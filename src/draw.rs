@@ -1,6 +1,4 @@
-use tiny_skia::{
-    Color, FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, Point, Rect, Stroke, Transform,
-};
+use tiny_skia::{Color, FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, Point, Rect, Stroke, Transform};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -164,19 +162,6 @@ pub fn copy_rect(dst: &mut Pixmap, src: &Pixmap, x: u32, y: u32, w: u32, h: u32)
         let off = row * stride + start;
         dst_data[off..off + len].copy_from_slice(&src_data[off..off + len]);
     }
-}
-
-pub fn crop(src: &Pixmap, x: u32, y: u32, w: u32, h: u32) -> Option<Pixmap> {
-    let mut out = Pixmap::new(w, h)?;
-    out.draw_pixmap(
-        -(x as i32),
-        -(y as i32),
-        src.as_ref(),
-        &PixmapPaint::default(),
-        Transform::identity(),
-        None,
-    );
-    Some(out)
 }
 
 pub fn selection_frame(canvas: &mut Pixmap, sel: &Sel, gap: f32, color: Color, scale: f32) {

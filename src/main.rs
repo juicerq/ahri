@@ -319,25 +319,13 @@ impl App {
         let Some(ov) = self.overlay.as_mut() else { return };
         let output = ov.output.clone().or_else(|| self.output_state.outputs().next());
         let info = output.as_ref().and_then(|o| self.output_state.info(o));
-        let (pos, logical_size, phys) = match &info {
-            Some(info) => {
-                let pos = info.logical_position.unwrap_or((0, 0));
-                let size = info.logical_size.unwrap_or((ov.logical.0 as i32, ov.logical.1 as i32));
-                let mode_w = info.modes.iter().find(|m| m.current).map_or(size.0, |m| m.dimensions.0);
-                (pos, size, mode_w as f32 / size.0.max(1) as f32)
-            }
-            None => ((0, 0), (ov.logical.0 as i32, ov.logical.1 as i32), 1.0),
-        };
-        let screen = (
-            (logical_size.0 as f32 * phys).round() as i32,
-            (logical_size.1 as f32 * phys).round() as i32,
-        );
+        let pos = info.as_ref().and_then(|i| i.logical_position).unwrap_or((0, 0));
+        let screen = (ov.logical.0 as i32, ov.logical.1 as i32);
 
-        let to_phys = phys / ov.scale;
-        let x0 = ((sel.x * to_phys).floor() as i32).clamp(0, screen.0) & !1;
-        let y0 = ((sel.y * to_phys).floor() as i32).clamp(0, screen.1) & !1;
-        let x1 = ((sel.x + sel.w) * to_phys).ceil() as i32;
-        let y1 = ((sel.y + sel.h) * to_phys).ceil() as i32;
+        let x0 = ((sel.x / ov.scale).floor() as i32).clamp(0, screen.0) & !1;
+        let y0 = ((sel.y / ov.scale).floor() as i32).clamp(0, screen.1) & !1;
+        let x1 = ((sel.x + sel.w) / ov.scale).ceil() as i32;
+        let y1 = ((sel.y + sel.h) / ov.scale).ceil() as i32;
         let w = align_up(x1 - x0, 4).min((screen.0 - x0) & !3);
         let h = align_up(y1 - y0, 2).min((screen.1 - y0) & !1);
         if w < 4 || h < 2 {
@@ -345,22 +333,18 @@ impl App {
             return;
         }
 
-        let from_phys = ov.scale / phys;
-        let ring = Sel {
-            x: x0 as f32 * from_phys,
-            y: y0 as f32 * from_phys,
-            w: w as f32 * from_phys,
-            h: h as f32 * from_phys,
-        };
-        ov.arm(ring);
+        ov.arm(Sel {
+            x: x0 as f32 * ov.scale,
+            y: y0 as f32 * ov.scale,
+            w: w as f32 * ov.scale,
+            h: h as f32 * ov.scale,
+        });
         let region = self.compositor.wl_compositor().create_region(&self.qh, Ud);
         ov.layer.wl_surface().set_input_region(Some(&region));
         region.destroy();
         ov.layer.set_keyboard_interactivity(KeyboardInteractivity::None);
 
-        let gx = (pos.0 as f32 * phys).round() as i32 + x0;
-        let gy = (pos.1 as f32 * phys).round() as i32 + y0;
-        self.pending_record = Some((gx, gy, w as u32, h as u32));
+        self.pending_record = Some((pos.0 + x0, pos.1 + y0, w as u32, h as u32));
         let qh = self.qh.clone();
         self.redraw(&qh);
     }

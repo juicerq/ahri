@@ -2,7 +2,9 @@ use smithay_client_toolkit::reexports::client::protocol::{wl_output::WlOutput, w
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::LayerSurface;
 use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
-use tiny_skia::{BlendMode, Color, FillRule, Mask, Paint, PathBuilder, Pixmap, Point, Rect, Stroke, Transform};
+use tiny_skia::{
+    BlendMode, Color, FillRule, IntRect, Mask, Paint, PathBuilder, Pixmap, Point, Rect, Stroke, Transform,
+};
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 
 use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
@@ -14,19 +16,19 @@ pub enum Mode {
     Record,
 }
 
-pub enum Drag {
+enum Drag {
     None,
     Selecting(Point),
-    Marking,
+    Marking(Mark),
     Resizing(Sel, Edges),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Edges {
-    pub left: bool,
-    pub right: bool,
-    pub top: bool,
-    pub bottom: bool,
+struct Edges {
+    left: bool,
+    right: bool,
+    top: bool,
+    bottom: bool,
 }
 
 impl Edges {
@@ -34,7 +36,7 @@ impl Edges {
         self.left || self.right || self.top || self.bottom
     }
 
-    pub fn cursor(&self) -> Shape {
+    fn cursor(&self) -> Shape {
         match (self.left, self.right, self.top, self.bottom) {
             (true, _, true, _) | (_, true, _, true) => Shape::NwseResize,
             (true, _, _, true) | (_, true, true, _) => Shape::NeswResize,
@@ -76,11 +78,10 @@ pub struct Overlay {
     pub scale: f32,
     pub frame: Option<Pixmap>,
     buffers: Vec<Buffer>,
-    pub sel: Option<Sel>,
-    pub drag: Drag,
-    pub marks: Vec<Mark>,
-    pub current: Option<Mark>,
-    pub tool: Tool,
+    sel: Option<Sel>,
+    drag: Drag,
+    marks: Vec<Mark>,
+    tool: Tool,
     color: usize,
     palette_open: bool,
     pub frame_pending: bool,
@@ -103,7 +104,6 @@ impl Overlay {
             sel: None,
             drag: Drag::None,
             marks: Vec::new(),
-            current: None,
             tool: Tool::Draw,
             color: 0,
             palette_open: false,
@@ -159,11 +159,10 @@ impl Overlay {
             return Outcome::Nothing;
         }
         if self.is_shot() && self.sel.is_some_and(|s| s.contains(p)) {
-            self.current = Some(match self.tool {
+            self.drag = Drag::Marking(match self.tool {
                 Tool::Draw => Mark::Draw(vec![p], draw::palette(self.color)),
                 Tool::Arrow => Mark::Arrow(p, p, draw::palette(self.color)),
             });
-            self.drag = Drag::Marking;
         } else {
             self.drag = Drag::Selecting(p);
             self.sel = Some(Sel::from_points(p, p));
@@ -172,7 +171,7 @@ impl Overlay {
     }
 
     pub fn motion(&mut self, p: Point) -> Outcome {
-        match &self.drag {
+        match &mut self.drag {
             Drag::None => return Outcome::Nothing,
             Drag::Selecting(start) => self.sel = Some(Sel::from_points(*start, p)),
             Drag::Resizing(orig, edges) => {
@@ -191,11 +190,8 @@ impl Overlay {
                 }
                 self.sel = Some(Sel::from_points(Point::from_xy(x0, y0), Point::from_xy(x1, y1)));
             }
-            Drag::Marking => match self.current.as_mut() {
-                Some(Mark::Draw(points, _)) => points.push(p),
-                Some(Mark::Arrow(_, end, _)) => *end = p,
-                None => {}
-            },
+            Drag::Marking(Mark::Draw(points, _)) => points.push(p),
+            Drag::Marking(Mark::Arrow(_, end, _)) => *end = p,
         }
         Outcome::Redraw
     }
@@ -204,10 +200,8 @@ impl Overlay {
         let drag = std::mem::replace(&mut self.drag, Drag::None);
         match drag {
             Drag::None => Outcome::Nothing,
-            Drag::Marking => {
-                if let Some(mark) = self.current.take() {
-                    self.marks.push(mark);
-                }
+            Drag::Marking(mark) => {
+                self.marks.push(mark);
                 Outcome::Redraw
             }
             Drag::Resizing(orig, _) => {
@@ -330,12 +324,20 @@ impl Overlay {
             Some(sel) => sel.snapped(shot.width(), shot.height()),
             None => (0, 0, shot.width(), shot.height()),
         };
-        let mut out = draw::crop(shot, x, y, w, h)?;
+        let mut out = shot.clone_rect(IntRect::from_xywh(x as i32, y as i32, w, h)?)?;
         let t = Transform::from_translate(-(x as f32), -(y as f32));
-        for mark in &self.marks {
+        for mark in self.all_marks() {
             draw::draw_mark(&mut out, mark, MARK_WIDTH * self.scale, t, None);
         }
         Some(out)
+    }
+
+    fn all_marks(&self) -> impl Iterator<Item = &Mark> {
+        let current = match &self.drag {
+            Drag::Marking(mark) => Some(mark),
+            _ => None,
+        };
+        self.marks.iter().chain(current)
     }
 
     fn toolbar_rect(&self) -> Option<Rect> {
@@ -439,7 +441,7 @@ impl Overlay {
                     self.ensure_mask(sel, frame.width(), frame.height());
                     let mask = self.mask.as_ref().map(|(_, m)| m);
                     let width = MARK_WIDTH * self.scale;
-                    for mark in self.marks.iter().chain(self.current.iter()) {
+                    for mark in self.all_marks() {
                         draw::draw_mark(&mut frame, mark, width, Transform::identity(), mask);
                     }
                     draw::selection_frame(&mut frame, &sel, 0.0, draw::frame_white(), self.scale);

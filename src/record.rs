@@ -17,7 +17,6 @@ impl Recording {
         let name = chrono::Local::now().format("ahri_%Y-%m-%d_%H-%M-%S.mp4").to_string();
         let path = dir.join(name);
 
-        let (w, h) = (w & !1, h & !1);
         let mut child = Command::new("gpu-screen-recorder")
             .args(["-w", &format!("{w}x{h}+{x}+{y}")])
             .args(["-f", "60", "-k", "h264", "-c", "mp4", "-cursor", "yes"])
@@ -30,20 +29,24 @@ impl Recording {
             .map_err(|e| format!("gpu-screen-recorder: {e}"))?;
 
         let pid = child.id() as i32;
-        let mut stderr = child.stderr.take();
+        let stderr = child.stderr.take();
         let out = path.clone();
         std::thread::spawn(move || {
-            let mut log = String::new();
-            if let Some(err) = stderr.as_mut() {
-                use std::io::Read;
-                let _ = err.read_to_string(&mut log);
-            }
+            use std::io::BufRead;
+            let last = stderr
+                .and_then(|err| {
+                    std::io::BufReader::new(err)
+                        .lines()
+                        .map_while(Result::ok)
+                        .filter(|l| l.contains("error"))
+                        .last()
+                })
+                .unwrap_or_default();
             let status = child.wait();
             let ok = status.as_ref().is_ok_and(|s| s.success()) && out.metadata().is_ok_and(|m| m.len() > 0);
             let result = if ok {
                 Ok(out)
             } else {
-                let last = log.lines().rfind(|l| l.contains("error")).unwrap_or("").to_string();
                 Err(format!("gpu-screen-recorder {status:?} {last}"))
             };
             let _ = tx.send(Msg::RecordingDone(result));
