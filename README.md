@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="assets/icon.svg" width="112" alt="ícone do ahri">
+<img src="assets/icon.svg" width="112" alt="ícone do Ahri">
 
-# ahri
+# Ahri
 
 **Print e gravação de tela para KDE Plasma no Wayland.**<br>
 Um daemon em Rust que abre na hora e copia direto para o clipboard.
@@ -13,7 +13,7 @@ Um daemon em Rust que abre na hora e copia direto para o clipboard.
 
 <br>
 
-<img src="docs/hero.png" alt="ahri: overlay de print com traço, seta e barra de ferramentas">
+<img src="docs/hero.png" alt="Overlay de print do Ahri com traço, seta e barra de ferramentas">
 
 </div>
 
@@ -59,7 +59,7 @@ Aperte <kbd>Win</kbd> <kbd>R</kbd> e arraste uma caixa. A gravação começa qua
 
 Aperte <kbd>Win</kbd> <kbd>R</kbd> de novo para parar. O vídeo vai para `~/Vídeos/Ahri/`, e o arquivo já fica no clipboard para colar no Discord, no navegador ou no gerenciador de arquivos.
 
-<img src="docs/gravando.png" alt="Área sendo gravada, com a moldura vermelha por fora">
+<p align="center"><img src="docs/gravando.png" width="600" alt="Área sendo gravada, com a moldura vermelha por fora"></p>
 
 A moldura fica fora da área gravada e não bloqueia cliques.
 
@@ -74,7 +74,7 @@ cd ahri
 ./install.sh
 ```
 
-O script instala o binário em `~/.local/bin`, registra o ahri no KWin e liga um serviço systemd de usuário. <kbd>Win</kbd> <kbd>Shift</kbd> <kbd>S</kbd> e <kbd>Win</kbd> <kbd>R</kbd> passam do Spectacle para o ahri. O Spectacle continua no <kbd>Print</kbd> e no <kbd>Win</kbd> <kbd>Shift</kbd> <kbd>R</kbd>.
+O script instala o binário em `~/.local/bin`, registra o Ahri no KWin e liga um serviço systemd de usuário. <kbd>Win</kbd> <kbd>Shift</kbd> <kbd>S</kbd> e <kbd>Win</kbd> <kbd>R</kbd> passam do Spectacle para o Ahri. O Spectacle continua no <kbd>Print</kbd> e no <kbd>Win</kbd> <kbd>Shift</kbd> <kbd>R</kbd>.
 
 <details>
 <summary>Remover</summary>
