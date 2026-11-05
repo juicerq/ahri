@@ -560,8 +560,8 @@ impl KeyboardHandler for App {
             Keysym::c | Keysym::C if ctrl && ov.is_shot() => Outcome::Copy,
             Keysym::Return | Keysym::KP_Enter if ov.is_shot() => Outcome::Copy,
             Keysym::z | Keysym::Z if ctrl => ov.undo(),
-            Keysym::d | Keysym::D if !ctrl => ov.set_tool(Tool::Draw),
-            Keysym::a | Keysym::A if !ctrl => ov.set_tool(Tool::Arrow),
+            Keysym::a | Keysym::A if !ctrl => ov.set_tool(Tool::Draw),
+            Keysym::d | Keysym::D if !ctrl => ov.set_tool(Tool::Arrow),
             k if !ctrl && ov.is_shot() && (Keysym::_1.raw()..=Keysym::_9.raw()).contains(&k.raw()) => {
                 ov.number((k.raw() - Keysym::_0.raw()) as usize)
             }

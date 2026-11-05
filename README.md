@@ -43,8 +43,8 @@ Aperte <kbd>Win</kbd> <kbd>Shift</kbd> <kbd>S</kbd>. A tela congela. Arraste uma
 
 | Tecla | Ação |
 | --- | --- |
-| <kbd>1</kbd> ou <kbd>D</kbd> | Desenhar |
-| <kbd>2</kbd> ou <kbd>A</kbd> | Seta |
+| <kbd>1</kbd> ou <kbd>A</kbd> | Desenhar |
+| <kbd>2</kbd> ou <kbd>D</kbd> | Seta |
 | <kbd>3</kbd> | Abrir as cores, depois <kbd>1</kbd>–<kbd>6</kbd> para escolher |
 | <kbd>C</kbd> | Próxima cor |
 | <kbd>Ctrl</kbd> <kbd>Z</kbd> | Desfazer |
