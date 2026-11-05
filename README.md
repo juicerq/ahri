@@ -7,7 +7,7 @@
 **Print e gravação de tela para KDE Plasma no Wayland.**<br>
 Um daemon em Rust que abre na hora e copia direto para o clipboard.
 
-![Rust](https://img.shields.io/badge/Rust-2024-1d1f25?style=flat-square&logo=rust&logoColor=white)
+![Rust](https://img.shields.io/badge/Rust-edition_2024-1d1f25?style=flat-square&logo=rust&logoColor=white)
 ![KDE Plasma 6](https://img.shields.io/badge/KDE_Plasma-6-1d1f25?style=flat-square&logo=kde&logoColor=white)
 ![Wayland](https://img.shields.io/badge/Wayland-only-1d1f25?style=flat-square&logo=wayland&logoColor=white)
 

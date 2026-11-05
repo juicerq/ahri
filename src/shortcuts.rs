@@ -1,8 +1,7 @@
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
-use zbus::MatchRule;
-use zbus::blocking::{Connection, MessageIterator};
+use zbus::export::futures_core::Stream;
 use zbus::message::Type;
-use zbus::zvariant::OwnedObjectPath;
+use zbus::{Connection, DynamicType, MatchRule, MessageStream, OwnedObjectPath};
 
 use crate::Msg;
 
@@ -33,29 +32,30 @@ const ACTIONS: [(Action, &str, &str, i32); 2] = [
 
 pub fn spawn(tx: Sender<Msg>) {
     std::thread::spawn(move || {
-        if let Err(e) = run(&tx) {
+        if let Err(e) = zbus::block_on(run(&tx)) {
             eprintln!("ahri: shortcuts: {e}");
             let _ = tx.send(Msg::Fatal(format!("shortcuts: {e}")));
         }
     });
 }
 
-fn run(tx: &Sender<Msg>) -> zbus::Result<()> {
-    let conn = Connection::session()?;
+async fn run(tx: &Sender<Msg>) -> zbus::Result<()> {
+    let conn = Connection::session().await?;
 
     for (_, name, friendly, key) in ACTIONS {
-        register(&conn, name, friendly, key)?;
+        register(&conn, name, friendly, key).await?;
     }
 
-    let path: OwnedObjectPath = call(&conn, "getComponent", &(COMPONENT,))?.body().deserialize()?;
+    let path: OwnedObjectPath = call(&conn, "getComponent", &(COMPONENT,)).await?.body().deserialize()?;
     let rule = MatchRule::builder()
         .msg_type(Type::Signal)
-        .interface("org.kde.kglobalaccel.Component")?
-        .member("globalShortcutPressed")?
-        .path(path)?
-        .build();
+        .interface("org.kde.kglobalaccel.Component")
+        .member("globalShortcutPressed")
+        .path(path)
+        .build()?;
 
-    for msg in MessageIterator::for_match_rule(rule, &conn, None)? {
+    let mut stream = MessageStream::for_match_rule(rule, &conn, None).await?;
+    while let Some(msg) = std::future::poll_fn(|cx| std::pin::Pin::new(&mut stream).poll_next(cx)).await {
         let msg = msg?;
         let Ok((component, name, _ts)) = msg.body().deserialize::<(String, String, i64)>() else {
             continue;
@@ -72,38 +72,39 @@ fn run(tx: &Sender<Msg>) -> zbus::Result<()> {
     Ok(())
 }
 
-fn register(conn: &Connection, name: &str, friendly: &str, key: i32) -> zbus::Result<()> {
+async fn register(conn: &Connection, name: &str, friendly: &str, key: i32) -> zbus::Result<()> {
     let id = vec![COMPONENT, name, COMPONENT_NAME, friendly];
-    call(conn, "doRegister", &(&id,))?;
+    call(conn, "doRegister", &(&id,)).await?;
 
-    let owner: Vec<String> = call(conn, "action", &(key,))?.body().deserialize()?;
+    let owner: Vec<String> = call(conn, "action", &(key,)).await?.body().deserialize()?;
     match owner.first().map(String::as_str) {
         None | Some(COMPONENT) => {}
         Some(TAKEOVER_FROM) => {
-            let keys: Vec<i32> = call(conn, "shortcut", &(&owner,))?.body().deserialize()?;
+            let keys: Vec<i32> = call(conn, "shortcut", &(&owner,)).await?.body().deserialize()?;
             let keep: Vec<i32> = keys.into_iter().filter(|k| *k != key).collect();
             eprintln!("ahri: taking {friendly} shortcut from {}", owner[..2].join("/"));
-            call(conn, "setForeignShortcut", &(&owner, keep))?;
+            call(conn, "setForeignShortcut", &(&owner, keep)).await?;
         }
         Some(_) => eprintln!("ahri: {friendly} shortcut is also bound to {}", owner[..2].join("/")),
     }
 
-    if !set(conn, &id, key)? {
+    if !set(conn, &id, key).await? {
         eprintln!("ahri: kglobalaccel refused shortcut for {name}");
     }
     Ok(())
 }
 
-fn set(conn: &Connection, id: &[&str], key: i32) -> zbus::Result<bool> {
-    let keys: Vec<i32> = call(conn, "setShortcut", &(id, vec![key], SET_PRESENT_NO_AUTOLOADING))?
+async fn set(conn: &Connection, id: &[&str], key: i32) -> zbus::Result<bool> {
+    let keys: Vec<i32> = call(conn, "setShortcut", &(id, vec![key], SET_PRESENT_NO_AUTOLOADING))
+        .await?
         .body()
         .deserialize()?;
     Ok(keys == [key])
 }
 
-fn call<B>(conn: &Connection, method: &str, body: &B) -> zbus::Result<zbus::Message>
+async fn call<B>(conn: &Connection, method: &str, body: &B) -> zbus::Result<zbus::Message>
 where
-    B: serde::Serialize + zbus::zvariant::DynamicType,
+    B: zbus::export::serde::Serialize + DynamicType,
 {
     conn.call_method(
         Some("org.kde.kglobalaccel"),
@@ -112,4 +113,5 @@ where
         method,
         body,
     )
+    .await
 }
