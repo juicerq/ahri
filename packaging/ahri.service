@@ -1,0 +1,12 @@
+[Unit]
+Description=Ahri screenshot and screen recording daemon
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/ahri
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
