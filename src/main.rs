@@ -53,7 +53,7 @@ pub enum Msg {
 }
 
 const BTN_LEFT: u32 = 0x110;
-const NAMESPACE: &str = "ahri";
+const NAMESPACE: &str = "utility";
 
 pub struct App {
     registry_state: RegistryState,
