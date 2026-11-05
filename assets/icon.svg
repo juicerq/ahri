@@ -1,4 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#dc2626"/>
-  <text x="32" y="32" dy="0.35em" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif" font-size="32" font-weight="600" fill="#ffffff">A</text>
+  <defs>
+    <mask id="eyes">
+      <rect width="64" height="64" fill="#fff"/>
+      <circle cx="27" cy="37" r="2.2" fill="#000"/>
+      <circle cx="37" cy="37" r="2.2" fill="#000"/>
+    </mask>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#111111"/>
+  <g fill="none" stroke="#f0efea" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M10,18 V15 a5,5 0 0 1 5,-5 H18"/>
+    <path d="M46,10 H49 a5,5 0 0 1 5,5 V18"/>
+    <path d="M10,46 V49 a5,5 0 0 0 5,5 H18"/>
+    <path d="M46,54 H49 a5,5 0 0 0 5,-5 V46"/>
+  </g>
+  <g transform="translate(32 32.5) scale(1.2) translate(-32 -32.5)">
+    <path mask="url(#eyes)" d="M19,42 V32 L22,21 L28.5,27.5 Q32,27 35.5,27.5 L42,21 L45,32 V42 Q45,44 43,44 H21 Q19,44 19,42 Z" fill="#f0efea" stroke="#f0efea" stroke-width="1.5" stroke-linejoin="round"/>
+  </g>
 </svg>
