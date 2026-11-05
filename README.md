@@ -100,5 +100,5 @@ rm ~/.local/bin/ahri ~/.local/share/applications/ahri.desktop \
 <br>
 
 <div align="center">
-<sub>O nome é da Ahri, a gatinha do autor.</sub>
+<sub>O nome é uma homenagem à Ahri, minha gatinha.</sub>
 </div>
