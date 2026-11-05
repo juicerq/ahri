@@ -22,7 +22,7 @@ pub fn capture_active_screen(conn: &Connection) -> Result<Pixmap, String> {
     });
 
     let mut options: HashMap<&str, Variant> = HashMap::new();
-    options.insert("include-cursor", Variant::from(false));
+    options.insert("include-cursor", Variant::from(true));
     options.insert("native-resolution", Variant::from(true));
 
     let reply = zbus::block_on(conn.call_method(
