@@ -24,7 +24,7 @@ pub struct Payload {
     pub entries: Vec<(&'static str, Vec<u8>)>,
 }
 
-pub struct ClipData;
+struct ClipData;
 
 impl Clipboard {
     pub fn bind(globals: &GlobalList, qh: &QueueHandle<App>) -> Result<Self, String> {

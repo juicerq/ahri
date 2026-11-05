@@ -29,18 +29,15 @@ impl Recording {
             .map_err(|e| format!("gpu-screen-recorder: {e}"))?;
 
         let pid = child.id() as i32;
-        let stderr = child.stderr.take();
+        let stderr = child.stderr.take().expect("stderr is piped");
         let out = path.clone();
         std::thread::spawn(move || {
             use std::io::BufRead;
-            let last = stderr
-                .and_then(|err| {
-                    std::io::BufReader::new(err)
-                        .lines()
-                        .map_while(Result::ok)
-                        .filter(|l| l.contains("error"))
-                        .last()
-                })
+            let last = std::io::BufReader::new(stderr)
+                .lines()
+                .map_while(Result::ok)
+                .filter(|l| l.contains("error"))
+                .last()
                 .unwrap_or_default();
             let status = child.wait();
             let ok = status.as_ref().is_ok_and(|s| s.success()) && out.metadata().is_ok_and(|m| m.len() > 0);

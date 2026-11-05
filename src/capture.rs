@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::io::Read;
-use std::os::fd::OwnedFd;
 
 use tiny_skia::{IntSize, Pixmap};
 use zbus::blocking::Connection;
@@ -14,12 +13,11 @@ const FORMAT_RGBA8888: u32 = 17;
 const FORMAT_RGBA8888_PREMULTIPLIED: u32 = 18;
 
 pub fn capture_active_screen(conn: &Connection) -> Result<Pixmap, String> {
-    let (read_end, write_end) = pipe().map_err(|e| format!("pipe: {e}"))?;
+    let (mut read_end, write_end) = std::io::pipe().map_err(|e| format!("pipe: {e}"))?;
 
     let reader = std::thread::spawn(move || {
-        let mut file = std::fs::File::from(read_end);
         let mut data = Vec::with_capacity(1920 * 1080 * 4);
-        file.read_to_end(&mut data).map(|_| data)
+        read_end.read_to_end(&mut data).map(|_| data)
     });
 
     let mut options: HashMap<&str, Value> = HashMap::new();
@@ -84,13 +82,4 @@ fn to_pixmap(data: &[u8], width: u32, height: u32, stride: usize, format: u32) -
 
     let size = IntSize::from_wh(width, height).ok_or("empty screenshot")?;
     Pixmap::from_vec(out, size).ok_or_else(|| "invalid pixmap".to_string())
-}
-
-fn pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
-    use std::os::fd::FromRawFd;
-    let mut fds = [0; 2];
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }

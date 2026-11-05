@@ -72,7 +72,7 @@ const GRAB: f32 = 8.0;
 pub struct Overlay {
     pub layer: LayerSurface,
     pub viewport: WpViewport,
-    pub mode: Mode,
+    mode: Mode,
     pub output: Option<WlOutput>,
     pub logical: (u32, u32),
     pub scale: f32,
@@ -284,7 +284,7 @@ impl Overlay {
         Outcome::Redraw
     }
 
-    pub fn toggle_palette(&mut self) -> Outcome {
+    fn toggle_palette(&mut self) -> Outcome {
         self.palette_open = !self.palette_open;
         Outcome::Redraw
     }
