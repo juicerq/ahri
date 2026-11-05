@@ -112,8 +112,8 @@ impl Dispatch2<ExtDataControlDeviceV1, App> for ClipData {
             ext_data_control_device_v1::Event::Selection { id: Some(offer) }
             | ext_data_control_device_v1::Event::PrimarySelection { id: Some(offer) } => offer.destroy(),
             ext_data_control_device_v1::Event::Finished => {
-                if let Some(clip) = app.clipboard.as_mut() {
-                    clip.device = None;
+                if let Some(device) = app.clipboard.as_mut().and_then(|c| c.device.take()) {
+                    device.destroy();
                 }
             }
             _ => {}

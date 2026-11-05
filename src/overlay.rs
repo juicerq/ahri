@@ -124,7 +124,7 @@ impl Overlay {
             Mode::Shot { shot, .. } => (shot.width(), shot.height()),
             Mode::Record => (w, h),
         };
-        self.scale = bw as f32 / w.max(1) as f32;
+        self.scale = bw as f32 / w as f32;
         if self.frame.as_ref().is_none_or(|f| f.width() != bw || f.height() != bh) {
             self.frame = Pixmap::new(bw, bh);
             self.buffers.clear();
@@ -139,19 +139,12 @@ impl Overlay {
 
     pub fn press(&mut self, p: Point) -> Outcome {
         if let Some(hit) = self.hit(p) {
-            match hit {
-                Hit::Tool(tool) => {
-                    self.tool = tool;
-                    self.palette_open = false;
-                }
-                Hit::ColorButton => self.palette_open = !self.palette_open,
-                Hit::Swatch(i) => {
-                    self.color = i;
-                    self.palette_open = false;
-                }
-                Hit::Panel => {}
-            }
-            return Outcome::Redraw;
+            return match hit {
+                Hit::Tool(tool) => self.set_tool(tool),
+                Hit::ColorButton => self.toggle_palette(),
+                Hit::Swatch(i) => self.number(i + 1),
+                Hit::Panel => Outcome::Nothing,
+            };
         }
         self.palette_open = false;
         if let Some((sel, edges)) = self.edges_at(p) {
