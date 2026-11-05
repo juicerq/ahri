@@ -6,7 +6,7 @@ mod record;
 mod shortcuts;
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
@@ -62,6 +62,7 @@ pub struct App {
     compositor: CompositorState,
     layer_shell: LayerShell,
     shm: Shm,
+    wayland: Connection,
     viewporter: WpViewporter,
     cursor_shape: Option<CursorShapeManager>,
     pool: SlotPool,
@@ -76,7 +77,7 @@ pub struct App {
     pointer_serial: u32,
     cursor: Option<Shape>,
     overlay: Option<Overlay>,
-    opened_at: Option<Instant>,
+    opened_at: Option<(Instant, Duration)>,
     pending_record: Option<(i32, i32, u32, u32)>,
     recording: Option<Recording>,
     stopping: bool,
@@ -127,6 +128,7 @@ fn run() -> Result<(), String> {
         cursor_shape: CursorShapeManager::bind(&globals, &qh).ok(),
         clipboard: Clipboard::bind(&globals, &qh).map_err(|e| eprintln!("ahri: {e}")).ok(),
         shm,
+        wayland: conn.clone(),
         pool,
         dbus: zbus::block_on(zbus::Connection::session()).map_err(|e| format!("dbus: {e}"))?,
         tx: tx.clone(),
@@ -173,7 +175,7 @@ impl App {
                 } else if self.overlay.as_ref().is_some_and(|o| !o.is_shot()) {
                     self.close_overlay();
                 } else if self.overlay.is_none() {
-                    self.open_overlay(Mode::Record);
+                    self.open_record();
                 }
             }
             Msg::RecordingDone(result) => {
@@ -198,20 +200,32 @@ impl App {
 
     fn open_shot(&mut self) {
         let started = Instant::now();
+        let (layer, viewport) = self.new_layer();
+        if let Err(e) = self.wayland.flush() {
+            eprintln!("ahri: wayland flush: {e}");
+        }
         match capture::capture_active_screen(&self.dbus) {
             Ok(shot) => {
-                let dim = draw::dimmed(&shot, 0.55);
-                self.opened_at = Some(started);
-                self.open_overlay(Mode::Shot { shot, dim });
+                self.opened_at = Some((started, started.elapsed()));
+                self.overlay = Some(Overlay::new(layer, viewport, Mode::Shot { shot }));
             }
             Err(e) => {
+                viewport.destroy();
+                drop(layer);
                 eprintln!("ahri: capture failed: {e}");
                 self.notify("Falha no print", &e);
             }
         }
     }
 
-    fn open_overlay(&mut self, mode: Mode) {
+    fn open_record(&mut self) {
+        let started = Instant::now();
+        let (layer, viewport) = self.new_layer();
+        self.opened_at = Some((started, Duration::ZERO));
+        self.overlay = Some(Overlay::new(layer, viewport, Mode::Record));
+    }
+
+    fn new_layer(&self) -> (LayerSurface, WpViewport) {
         let qh = &self.qh;
         let surface = self.compositor.create_surface(qh);
         let viewport = self.viewporter.get_viewport(&surface, qh, Ud);
@@ -222,7 +236,7 @@ impl App {
         layer.set_exclusive_zone(-1);
         layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
         layer.commit();
-        self.overlay = Some(Overlay::new(layer, viewport, mode));
+        (layer, viewport)
     }
 
     fn close_overlay(&mut self) {
@@ -235,14 +249,14 @@ impl App {
 
     fn redraw(&mut self, qh: &QueueHandle<Self>) {
         let Some(ov) = self.overlay.as_mut() else { return };
-        if ov.frame.is_none() {
+        if ov.size.is_none() {
             return;
         }
         if ov.frame_pending {
             ov.dirty = true;
             return;
         }
-        ov.render();
+        let render_started = Instant::now();
         if let Err(e) = ov.present(&mut self.pool) {
             eprintln!("ahri: present: {e}");
             return;
@@ -252,8 +266,15 @@ impl App {
         ov.layer.commit();
         ov.dirty = false;
         ov.frame_pending = true;
-        if let Some(t) = self.opened_at.take() {
-            eprintln!("ahri: overlay shown in {:?}", t.elapsed());
+        if let Some((started, capture)) = self.opened_at.take() {
+            let mode = if ov.is_shot() { "shot" } else { "record" };
+            eprintln!(
+                "ahri: {mode} overlay shown in {:?} (capture {:?}, configure wait {:?}, render {:?})",
+                started.elapsed(),
+                capture,
+                render_started.duration_since(started).saturating_sub(capture),
+                render_started.elapsed()
+            );
         }
     }
 

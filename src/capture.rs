@@ -4,6 +4,8 @@ use std::io::Read;
 use tiny_skia::{IntSize, Pixmap};
 use zbus::{Connection, Fd, OwnedVariant, Variant};
 
+use crate::draw;
+
 const FORMAT_RGB32: u32 = 4;
 const FORMAT_ARGB32: u32 = 5;
 const FORMAT_ARGB32_PREMULTIPLIED: u32 = 6;
@@ -50,12 +52,13 @@ pub fn capture_active_screen(conn: &Connection) -> Result<Pixmap, String> {
     let stride = get("stride")? as usize;
     let format = get("format")?;
 
-    to_pixmap(&data, width, height, stride, format)
+    to_pixmap(data, width, height, stride, format)
 }
 
-fn to_pixmap(data: &[u8], width: u32, height: u32, stride: usize, format: u32) -> Result<Pixmap, String> {
+fn to_pixmap(mut data: Vec<u8>, width: u32, height: u32, stride: usize, format: u32) -> Result<Pixmap, String> {
     let row_bytes = width as usize * 4;
-    if stride < row_bytes || data.len() < stride * (height as usize - 1) + row_bytes {
+    let rows = height as usize;
+    if rows == 0 || stride < row_bytes || data.len() < stride * (rows - 1) + row_bytes {
         return Err(format!(
             "short image data: {} bytes for {width}x{height} stride {stride}",
             data.len()
@@ -68,17 +71,17 @@ fn to_pixmap(data: &[u8], width: u32, height: u32, stride: usize, format: u32) -
         other => return Err(format!("unsupported image format {other}")),
     };
 
-    let mut out = Vec::with_capacity(row_bytes * height as usize);
-    for row in data.chunks(stride).take(height as usize) {
-        for px in row[..row_bytes].as_chunks::<4>().0 {
-            if bgra {
-                out.extend_from_slice(&[px[2], px[1], px[0], 255]);
-            } else {
-                out.extend_from_slice(&[px[0], px[1], px[2], 255]);
-            }
+    if stride != row_bytes {
+        for row in 1..rows {
+            data.copy_within(row * stride..row * stride + row_bytes, row * row_bytes);
         }
     }
+    data.truncate(row_bytes * rows);
+    if !bgra {
+        draw::swap_rb(&mut data);
+    }
+    draw::make_opaque(&mut data);
 
     let size = IntSize::from_wh(width, height).ok_or("empty screenshot")?;
-    Pixmap::from_vec(out, size).ok_or_else(|| "invalid pixmap".to_string())
+    Pixmap::from_vec(data, size).ok_or_else(|| "invalid pixmap".to_string())
 }

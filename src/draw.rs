@@ -1,4 +1,6 @@
-use tiny_skia::{Color, FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, Point, Rect, Stroke, Transform};
+use tiny_skia::{
+    Color, FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, PixmapMut, Point, Rect, Stroke, Transform,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -21,9 +23,15 @@ pub const PALETTE: [(u8, u8, u8); 6] = [
     (17, 17, 17),
 ];
 
+const DIM: u32 = 140;
+
+pub fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color {
+    Color::from_rgba8(b, g, r, a)
+}
+
 pub fn palette(i: usize) -> Color {
     let (r, g, b) = PALETTE[i % PALETTE.len()];
-    Color::from_rgba8(r, g, b, 255)
+    rgba(r, g, b, 255)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -66,7 +74,7 @@ pub fn frame_white() -> Color {
 }
 
 pub fn frame_red() -> Color {
-    Color::from_rgba8(255, 80, 80, 255)
+    rgba(255, 80, 80, 255)
 }
 
 pub fn paint(color: Color) -> Paint<'static> {
@@ -76,7 +84,7 @@ pub fn paint(color: Color) -> Paint<'static> {
     p
 }
 
-pub fn draw_mark(canvas: &mut Pixmap, mark: &Mark, width: f32, transform: Transform, mask: Option<&Mask>) {
+pub fn draw_mark(canvas: &mut PixmapMut, mark: &Mark, width: f32, transform: Transform, mask: Option<&Mask>) {
     let stroke = Stroke {
         width,
         line_cap: LineCap::Round,
@@ -142,29 +150,61 @@ pub fn draw_mark(canvas: &mut Pixmap, mark: &Mark, width: f32, transform: Transf
     }
 }
 
-pub fn dimmed(src: &Pixmap, factor: f32) -> Pixmap {
-    let mut out = src.clone();
-    let f = (factor * 256.0) as u16;
-    for px in out.data_mut().as_chunks_mut::<4>().0 {
-        px[0] = ((px[0] as u16 * f) >> 8) as u8;
-        px[1] = ((px[1] as u16 * f) >> 8) as u8;
-        px[2] = ((px[2] as u16 * f) >> 8) as u8;
+pub fn dim_into(dst: &mut [u8], src: &[u8]) {
+    let (dst_blocks, dst_tail) = dst.as_chunks_mut::<64>();
+    let (src_blocks, src_tail) = src.as_chunks::<64>();
+    for (d, s) in dst_blocks.iter_mut().zip(src_blocks) {
+        for o in (0..64).step_by(4) {
+            d[o..o + 4].copy_from_slice(&dim_pixel([s[o], s[o + 1], s[o + 2], s[o + 3]]));
+        }
     }
-    out
+    for (d, s) in dst_tail
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(src_tail.as_chunks::<4>().0)
+    {
+        *d = dim_pixel(*s);
+    }
 }
 
-pub fn copy_rect(dst: &mut Pixmap, src: &Pixmap, x: u32, y: u32, w: u32, h: u32) {
-    let stride = src.width() as usize * 4;
+#[inline(always)]
+fn dim_pixel(px: [u8; 4]) -> [u8; 4] {
+    let p = u32::from_le_bytes(px);
+    let rb = (((p & 0x00ff_00ff) * DIM) >> 8) & 0x00ff_00ff;
+    let g = (((p & 0x0000_ff00) * DIM) >> 8) & 0x0000_ff00;
+    (rb | g | (p & 0xff00_0000)).to_le_bytes()
+}
+
+pub fn fill_solid(dst: &mut [u8], px: [u8; 4]) {
+    for d in dst.as_chunks_mut::<4>().0 {
+        *d = px;
+    }
+}
+
+pub fn copy_rect(dst: &mut [u8], src: &[u8], width: u32, (x, y, w, h): (u32, u32, u32, u32)) {
+    let stride = width as usize * 4;
     let (start, len) = (x as usize * 4, w as usize * 4);
-    let src_data = src.data();
-    let dst_data = dst.data_mut();
     for row in y as usize..(y + h) as usize {
         let off = row * stride + start;
-        dst_data[off..off + len].copy_from_slice(&src_data[off..off + len]);
+        dst[off..off + len].copy_from_slice(&src[off..off + len]);
     }
 }
 
-pub fn selection_frame(canvas: &mut Pixmap, sel: &Sel, gap: f32, color: Color, scale: f32) {
+pub fn swap_rb(data: &mut [u8]) {
+    for px in data.as_chunks_mut::<4>().0 {
+        let p = u32::from_le_bytes(*px);
+        *px = ((p & 0xff00_ff00) | ((p >> 16) & 0xff) | ((p & 0xff) << 16)).to_le_bytes();
+    }
+}
+
+pub fn make_opaque(data: &mut [u8]) {
+    for px in data.as_chunks_mut::<4>().0 {
+        *px = (u32::from_le_bytes(*px) | 0xff00_0000).to_le_bytes();
+    }
+}
+
+pub fn selection_frame(canvas: &mut PixmapMut, sel: &Sel, gap: f32, color: Color, scale: f32) {
     let line_w = 1.0 * scale;
     let corner_w = 3.0 * scale;
     let len = 14.0 * scale;
@@ -216,13 +256,9 @@ pub fn selection_frame(canvas: &mut Pixmap, sel: &Sel, gap: f32, color: Color, s
     }
 }
 
-pub fn to_bgra(src: &[u8], dst: &mut [u8]) {
-    for (s, d) in src.as_chunks::<4>().0.iter().zip(dst.as_chunks_mut::<4>().0) {
-        *d = [s[2], s[1], s[0], s[3]];
-    }
-}
-
 pub fn encode_png(pixmap: &Pixmap) -> Result<Vec<u8>, String> {
+    let mut rgba = pixmap.data().to_vec();
+    swap_rb(&mut rgba);
     let mut out = Vec::with_capacity(pixmap.data().len() / 3);
     {
         let mut enc = png::Encoder::new(&mut out, pixmap.width(), pixmap.height());
@@ -230,7 +266,7 @@ pub fn encode_png(pixmap: &Pixmap) -> Result<Vec<u8>, String> {
         enc.set_depth(png::BitDepth::Eight);
         enc.set_compression(png::Compression::Fast);
         let mut writer = enc.write_header().map_err(|e| e.to_string())?;
-        writer.write_image_data(pixmap.data()).map_err(|e| e.to_string())?;
+        writer.write_image_data(&rgba).map_err(|e| e.to_string())?;
     }
     Ok(out)
 }

@@ -3,7 +3,7 @@ use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::LayerSurface;
 use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use tiny_skia::{
-    BlendMode, Color, FillRule, IntRect, Mask, Paint, PathBuilder, Pixmap, Point, Rect, Stroke, Transform,
+    BlendMode, Color, FillRule, IntRect, Mask, Paint, PathBuilder, Pixmap, PixmapMut, Point, Rect, Stroke, Transform,
 };
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 
@@ -12,7 +12,7 @@ use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::
 use crate::draw::{self, Mark, Sel, Tool};
 
 pub enum Mode {
-    Shot { shot: Pixmap, dim: Pixmap },
+    Shot { shot: Pixmap },
     Record,
 }
 
@@ -76,7 +76,7 @@ pub struct Overlay {
     pub output: Option<WlOutput>,
     pub logical: (u32, u32),
     pub scale: f32,
-    pub frame: Option<Pixmap>,
+    pub size: Option<(u32, u32)>,
     buffers: Vec<Buffer>,
     sel: Option<Sel>,
     drag: Drag,
@@ -99,7 +99,7 @@ impl Overlay {
             output: None,
             logical: (0, 0),
             scale: 1.0,
-            frame: None,
+            size: None,
             buffers: Vec::new(),
             sel: None,
             drag: Drag::None,
@@ -125,8 +125,8 @@ impl Overlay {
             Mode::Record => (w, h),
         };
         self.scale = bw as f32 / w as f32;
-        if self.frame.as_ref().is_none_or(|f| f.width() != bw || f.height() != bh) {
-            self.frame = Pixmap::new(bw, bh);
+        if self.size != Some((bw, bh)) {
+            self.size = Some((bw, bh));
             self.buffers.clear();
         }
         self.viewport.set_destination(w as i32, h as i32);
@@ -320,7 +320,7 @@ impl Overlay {
         let mut out = shot.clone_rect(IntRect::from_xywh(x as i32, y as i32, w, h)?)?;
         let t = Transform::from_translate(-(x as f32), -(y as f32));
         for mark in self.all_marks() {
-            draw::draw_mark(&mut out, mark, MARK_WIDTH * self.scale, t, None);
+            draw::draw_mark(&mut out.as_mut(), mark, MARK_WIDTH * self.scale, t, None);
         }
         Some(out)
     }
@@ -423,15 +423,23 @@ impl Overlay {
             .or_else(|| self.palette_rect().filter(inside).map(|_| Hit::Panel))
     }
 
-    pub fn render(&mut self) {
-        let Some(mut frame) = self.frame.take() else { return };
+    fn render(&self, data: &mut [u8], w: u32, h: u32) {
         match &self.mode {
-            Mode::Shot { shot, dim } => {
-                frame.data_mut().copy_from_slice(dim.data());
+            Mode::Shot { shot } => {
+                draw::dim_into(data, shot.data());
                 if let Some(sel) = self.sel {
-                    let (x, y, w, h) = sel.snapped(shot.width(), shot.height());
-                    draw::copy_rect(&mut frame, shot, x, y, w, h);
-                    self.ensure_mask(sel, frame.width(), frame.height());
+                    draw::copy_rect(data, shot.data(), w, sel.snapped(w, h));
+                }
+            }
+            Mode::Record if self.ring.is_some() => draw::fill_solid(data, [0, 0, 0, 0]),
+            Mode::Record => draw::fill_solid(data, [0, 0, 0, 90]),
+        }
+        let Some(mut frame) = PixmapMut::from_bytes(data, w, h) else {
+            return;
+        };
+        match &self.mode {
+            Mode::Shot { .. } => {
+                if let Some(sel) = self.sel {
                     let mask = self.mask.as_ref().map(|(_, m)| m);
                     let width = MARK_WIDTH * self.scale;
                     for mark in self.all_marks() {
@@ -441,24 +449,21 @@ impl Overlay {
                 }
                 self.render_toolbar(&mut frame);
             }
-            Mode::Record if self.ring.is_some() => {
-                frame.fill(Color::TRANSPARENT);
-                let ring = self.ring.unwrap();
-                draw::selection_frame(&mut frame, &ring, RING_GAP, draw::frame_red(), self.scale);
-            }
             Mode::Record => {
-                frame.fill(Color::from_rgba8(0, 0, 0, 90));
-                if let Some(rect) = self.sel.and_then(|s| s.rect()) {
+                if let Some(ring) = self.ring {
+                    draw::selection_frame(&mut frame, &ring, RING_GAP, draw::frame_red(), self.scale);
+                } else if let Some(sel) = self.sel
+                    && let Some(rect) = sel.rect()
+                {
                     let clear = Paint {
                         blend_mode: BlendMode::Clear,
                         ..Paint::default()
                     };
                     frame.fill_rect(rect, &clear, Transform::identity(), None);
-                    draw::selection_frame(&mut frame, &self.sel.unwrap(), 0.0, draw::frame_white(), self.scale);
+                    draw::selection_frame(&mut frame, &sel, 0.0, draw::frame_white(), self.scale);
                 }
             }
         }
-        self.frame = Some(frame);
     }
 
     fn ensure_mask(&mut self, sel: Sel, w: u32, h: u32) {
@@ -476,14 +481,14 @@ impl Overlay {
         });
     }
 
-    fn render_toolbar(&self, frame: &mut Pixmap) {
+    fn render_toolbar(&self, frame: &mut PixmapMut) {
         let (Some(bar), Some(buttons)) = (self.toolbar_rect(), self.button_rects()) else {
             return;
         };
         let s = self.scale;
         let id = Transform::identity();
-        let bg = draw::paint(Color::from_rgba8(32, 34, 37, 240));
-        let active = draw::paint(Color::from_rgba8(255, 255, 255, 40));
+        let bg = draw::paint(draw::rgba(32, 34, 37, 240));
+        let active = draw::paint(draw::rgba(255, 255, 255, 40));
         let current = draw::palette(self.color);
         if let Some(path) = rounded(bar, 8.0 * s) {
             frame.fill_path(&path, &bg, FillRule::Winding, id, None);
@@ -535,15 +540,19 @@ impl Overlay {
     }
 
     pub fn present(&mut self, pool: &mut SlotPool) -> Result<(), String> {
-        let Some(frame) = self.frame.as_ref() else {
+        let Some((w, h)) = self.size else {
             return Ok(());
         };
-        let (w, h) = (frame.width() as i32, frame.height() as i32);
+        if self.is_shot()
+            && let Some(sel) = self.sel
+        {
+            self.ensure_mask(sel, w, h);
+        }
         let idx = match (0..self.buffers.len()).find(|&i| self.buffers[i].canvas(pool).is_some()) {
             Some(i) => i,
             None => {
                 let (buffer, _) = pool
-                    .create_buffer(w, h, w * 4, wl_shm::Format::Argb8888)
+                    .create_buffer(w as i32, h as i32, w as i32 * 4, wl_shm::Format::Argb8888)
                     .map_err(|e| format!("create buffer: {e}"))?;
                 self.buffers.push(buffer);
                 self.buffers.len() - 1
@@ -551,15 +560,15 @@ impl Overlay {
         };
         let buffer = &self.buffers[idx];
         let canvas = buffer.canvas(pool).ok_or("buffer busy")?;
-        draw::to_bgra(frame.data(), canvas);
+        self.render(canvas, w, h);
         let surface = self.layer.wl_surface();
         buffer.attach_to(surface).map_err(|e| format!("attach: {e:?}"))?;
-        surface.damage_buffer(0, 0, w, h);
+        surface.damage_buffer(0, 0, w as i32, h as i32);
         Ok(())
     }
 }
 
-fn swatch(frame: &mut Pixmap, r: Rect, color: Color, selected: bool, s: f32) {
+fn swatch(frame: &mut PixmapMut, r: Rect, color: Color, selected: bool, s: f32) {
     let (cx, cy) = ((r.left() + r.right()) / 2.0, (r.top() + r.bottom()) / 2.0);
     let id = Transform::identity();
     if let Some(dot) = PathBuilder::from_circle(cx, cy, 8.0 * s) {
@@ -568,13 +577,7 @@ fn swatch(frame: &mut Pixmap, r: Rect, color: Color, selected: bool, s: f32) {
             width: 1.0 * s,
             ..Stroke::default()
         };
-        frame.stroke_path(
-            &dot,
-            &draw::paint(Color::from_rgba8(255, 255, 255, 70)),
-            &edge,
-            id,
-            None,
-        );
+        frame.stroke_path(&dot, &draw::paint(draw::rgba(255, 255, 255, 70)), &edge, id, None);
     }
     if selected && let Some(ring) = PathBuilder::from_circle(cx, cy, 12.0 * s) {
         let stroke = Stroke {
