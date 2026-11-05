@@ -66,7 +66,7 @@ pub struct App {
     cursor_shape: Option<CursorShapeManager>,
     pool: SlotPool,
     pub clipboard: Option<Clipboard>,
-    dbus: zbus::blocking::Connection,
+    dbus: zbus::Connection,
     tx: channel::Sender<Msg>,
     qh: QueueHandle<App>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
@@ -128,7 +128,7 @@ fn run() -> Result<(), String> {
         clipboard: Clipboard::bind(&globals, &qh).map_err(|e| eprintln!("ahri: {e}")).ok(),
         shm,
         pool,
-        dbus: zbus::blocking::Connection::session().map_err(|e| format!("dbus: {e}"))?,
+        dbus: zbus::block_on(zbus::Connection::session()).map_err(|e| format!("dbus: {e}"))?,
         tx: tx.clone(),
         qh: qh.clone(),
         keyboard: None,
@@ -364,14 +364,14 @@ impl App {
     }
 
     fn notify(&self, summary: &str, body: &str) {
-        let hints = std::collections::HashMap::from([("desktop-entry", zbus::zvariant::Value::from("ahri"))]);
-        let _ = self.dbus.call_method(
+        let hints = std::collections::HashMap::from([("desktop-entry", zbus::Variant::from("ahri"))]);
+        let _ = zbus::block_on(self.dbus.call_method(
             Some("org.freedesktop.Notifications"),
             "/org/freedesktop/Notifications",
             Some("org.freedesktop.Notifications"),
             "Notify",
             &("Ahri", 0u32, "ahri", summary, body, Vec::<&str>::new(), hints, 4000i32),
-        );
+        ));
     }
 }
 

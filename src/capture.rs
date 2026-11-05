@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::io::Read;
 
 use tiny_skia::{IntSize, Pixmap};
-use zbus::blocking::Connection;
-use zbus::zvariant::{Fd, OwnedValue, Value};
+use zbus::{Connection, Fd, OwnedVariant, Variant};
 
 const FORMAT_RGB32: u32 = 4;
 const FORMAT_ARGB32: u32 = 5;
@@ -20,21 +19,21 @@ pub fn capture_active_screen(conn: &Connection) -> Result<Pixmap, String> {
         read_end.read_to_end(&mut data).map(|_| data)
     });
 
-    let mut options: HashMap<&str, Value> = HashMap::new();
-    options.insert("include-cursor", Value::from(false));
-    options.insert("native-resolution", Value::from(true));
+    let mut options: HashMap<&str, Variant> = HashMap::new();
+    options.insert("include-cursor", Variant::from(false));
+    options.insert("native-resolution", Variant::from(true));
 
-    let reply = conn.call_method(
+    let reply = zbus::block_on(conn.call_method(
         Some("org.kde.KWin"),
         "/org/kde/KWin/ScreenShot2",
         Some("org.kde.KWin.ScreenShot2"),
         "CaptureActiveScreen",
         &(options, Fd::from(&write_end)),
-    );
+    ));
     drop(write_end);
 
     let reply = reply.map_err(|e| format!("KWin ScreenShot2: {e}"))?;
-    let meta: HashMap<String, OwnedValue> = reply.body().deserialize().map_err(|e| format!("KWin reply: {e}"))?;
+    let meta: HashMap<String, OwnedVariant> = reply.body().deserialize().map_err(|e| format!("KWin reply: {e}"))?;
 
     let data = reader
         .join()
