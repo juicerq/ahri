@@ -186,7 +186,6 @@ impl App {
                     Ok(path) => {
                         eprintln!("ahri: saved {}", path.display());
                         self.copy_file(&path);
-                        self.notify("Gravação copiada", &path.display().to_string());
                     }
                     Err(e) => {
                         eprintln!("ahri: recording failed: {e}");
