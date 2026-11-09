@@ -6,12 +6,16 @@ use tiny_skia::{
 pub enum Tool {
     Draw,
     Arrow,
+    Rect,
+    Ellipse,
 }
 
 #[derive(Debug, Clone)]
 pub enum Mark {
     Draw(Vec<Point>, Color),
     Arrow(Point, Point, Color),
+    Rect(Point, Point, Color),
+    Ellipse(Point, Point, Color),
 }
 
 pub const PALETTE: [(u8, u8, u8); 6] = [
@@ -92,7 +96,7 @@ pub fn draw_mark(canvas: &mut PixmapMut, mark: &Mark, width: f32, transform: Tra
         ..Stroke::default()
     };
     let color = match mark {
-        Mark::Draw(_, c) | Mark::Arrow(_, _, c) => *c,
+        Mark::Draw(_, c) | Mark::Arrow(_, _, c) | Mark::Rect(_, _, c) | Mark::Ellipse(_, _, c) => *c,
     };
     let p = paint(color);
     match mark {
@@ -147,7 +151,23 @@ pub fn draw_mark(canvas: &mut PixmapMut, mark: &Mark, width: f32, transform: Tra
                 canvas.stroke_path(&path, &p, &head_stroke, transform, mask);
             }
         }
+        Mark::Rect(a, b, _) => {
+            if let Some(rect) = Sel::from_points(*a, *b).rect() {
+                canvas.stroke_path(&PathBuilder::from_rect(rect), &p, &stroke, transform, mask);
+            }
+        }
+        Mark::Ellipse(a, b, _) => {
+            if let Some(path) = Sel::from_points(*a, *b).rect().and_then(PathBuilder::from_oval) {
+                canvas.stroke_path(&path, &p, &stroke, transform, mask);
+            }
+        }
     }
+}
+
+pub fn squared(start: Point, p: Point) -> Point {
+    let (dx, dy) = (p.x - start.x, p.y - start.y);
+    let side = dx.abs().max(dy.abs());
+    Point::from_xy(start.x + side.copysign(dx), start.y + side.copysign(dy))
 }
 
 pub fn dim_into(dst: &mut [u8], src: &[u8]) {
@@ -269,4 +289,60 @@ pub fn encode_png(pixmap: &Pixmap) -> Result<Vec<u8>, String> {
         writer.write_image_data(&rgba).map_err(|e| e.to_string())?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rendered(mark: &Mark) -> Pixmap {
+        let mut pixmap = Pixmap::new(100, 100).unwrap();
+        draw_mark(&mut pixmap.as_mut(), mark, 4.0, Transform::identity(), None);
+        pixmap
+    }
+
+    fn painted(pixmap: &Pixmap, x: u32, y: u32) -> bool {
+        pixmap.pixel(x, y).unwrap().alpha() > 0
+    }
+
+    #[test]
+    fn squared_uses_longest_side_in_drag_direction() {
+        let start = Point::from_xy(50.0, 50.0);
+        for (p, expected) in [
+            ((80.0, 60.0), (80.0, 80.0)),
+            ((20.0, 60.0), (20.0, 80.0)),
+            ((60.0, 20.0), (80.0, 20.0)),
+            ((40.0, 45.0), (40.0, 40.0)),
+        ] {
+            let end = squared(start, Point::from_xy(p.0, p.1));
+            assert_eq!((end.x, end.y), expected);
+        }
+    }
+
+    #[test]
+    fn rect_is_outline_from_either_drag_direction() {
+        let (a, b) = (Point::from_xy(20.0, 30.0), Point::from_xy(80.0, 70.0));
+        for mark in [Mark::Rect(a, b, palette(0)), Mark::Rect(b, a, palette(0))] {
+            let pixmap = rendered(&mark);
+            assert!(painted(&pixmap, 20, 50));
+            assert!(painted(&pixmap, 80, 50));
+            assert!(painted(&pixmap, 50, 30));
+            assert!(painted(&pixmap, 50, 70));
+            assert!(!painted(&pixmap, 50, 50));
+            assert!(!painted(&pixmap, 10, 50));
+        }
+    }
+
+    #[test]
+    fn ellipse_touches_box_sides_and_skips_corners() {
+        let mark = Mark::Ellipse(Point::from_xy(20.0, 30.0), Point::from_xy(80.0, 70.0), palette(0));
+        let pixmap = rendered(&mark);
+        assert!(painted(&pixmap, 20, 50));
+        assert!(painted(&pixmap, 80, 50));
+        assert!(painted(&pixmap, 50, 30));
+        assert!(painted(&pixmap, 50, 70));
+        assert!(!painted(&pixmap, 50, 50));
+        assert!(!painted(&pixmap, 20, 30));
+        assert!(!painted(&pixmap, 80, 70));
+    }
 }

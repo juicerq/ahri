@@ -23,7 +23,7 @@ Um daemon em Rust que abre na hora e copia direto para o clipboard.
 
 - **Abre em cerca de 50 ms.** O daemon já está rodando, e a tela vem direto do KWin, sem diálogo de permissão.
 - **Copia na hora.** O PNG vai para o clipboard em cerca de 30 ms. O vídeo vai como arquivo, pronto para colar.
-- **Só 2 ferramentas.** Desenho livre e seta, em 6 cores. Nada de menus.
+- **Só 4 ferramentas.** Desenho livre, seta, quadrado e círculo, em 6 cores. Nada de menus.
 - **Leve.** Sem Qt nem GTK: o overlay é uma janela layer-shell desenhada na CPU.
 
 ## Print
@@ -45,13 +45,15 @@ Aperte <kbd>Win</kbd> <kbd>Shift</kbd> <kbd>S</kbd>. A tela congela. Arraste uma
 | --- | --- |
 | <kbd>1</kbd> ou <kbd>A</kbd> | Desenhar |
 | <kbd>2</kbd> ou <kbd>D</kbd> | Seta |
-| <kbd>3</kbd> | Abrir as cores, depois <kbd>1</kbd>–<kbd>6</kbd> para escolher |
+| <kbd>3</kbd> ou <kbd>Q</kbd> | Quadrado |
+| <kbd>4</kbd> ou <kbd>E</kbd> | Círculo |
+| <kbd>5</kbd> | Abrir as cores, depois <kbd>1</kbd>–<kbd>6</kbd> para escolher |
 | <kbd>C</kbd> | Próxima cor |
 | <kbd>Ctrl</kbd> <kbd>Z</kbd> | Desfazer |
 | <kbd>Ctrl</kbd> <kbd>C</kbd> ou <kbd>Enter</kbd> | Copiar e fechar |
 | <kbd>Esc</kbd> | Cancelar |
 
-Arraste as bordas ou os cantos para redimensionar a área. Cada traço guarda a própria cor, e todo print começa em vermelho.
+Arraste as bordas ou os cantos para redimensionar a área. Com quadrado ou círculo, arraste dentro da área para definir o tamanho. Segure <kbd>Shift</kbd> para manter os lados iguais. Cada traço guarda a própria cor, e todo print começa em vermelho.
 
 ## Gravação
 

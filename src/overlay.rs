@@ -155,6 +155,8 @@ impl Overlay {
             self.drag = Drag::Marking(match self.tool {
                 Tool::Draw => Mark::Draw(vec![p], draw::palette(self.color)),
                 Tool::Arrow => Mark::Arrow(p, p, draw::palette(self.color)),
+                Tool::Rect => Mark::Rect(p, p, draw::palette(self.color)),
+                Tool::Ellipse => Mark::Ellipse(p, p, draw::palette(self.color)),
             });
         } else {
             self.drag = Drag::Selecting(p);
@@ -163,7 +165,7 @@ impl Overlay {
         Outcome::Redraw
     }
 
-    pub fn motion(&mut self, p: Point) -> Outcome {
+    pub fn motion(&mut self, p: Point, shift: bool) -> Outcome {
         match &mut self.drag {
             Drag::None => return Outcome::Nothing,
             Drag::Selecting(start) => self.sel = Some(Sel::from_points(*start, p)),
@@ -185,6 +187,9 @@ impl Overlay {
             }
             Drag::Marking(Mark::Draw(points, _)) => points.push(p),
             Drag::Marking(Mark::Arrow(_, end, _)) => *end = p,
+            Drag::Marking(Mark::Rect(start, end, _) | Mark::Ellipse(start, end, _)) => {
+                *end = if shift { draw::squared(*start, p) } else { p };
+            }
         }
         Outcome::Redraw
     }
@@ -193,6 +198,7 @@ impl Overlay {
         let drag = std::mem::replace(&mut self.drag, Drag::None);
         match drag {
             Drag::None => Outcome::Nothing,
+            Drag::Marking(Mark::Rect(a, b, _) | Mark::Ellipse(a, b, _)) if a == b => Outcome::Redraw,
             Drag::Marking(mark) => {
                 self.marks.push(mark);
                 Outcome::Redraw
@@ -294,7 +300,9 @@ impl Overlay {
         match n {
             1 => self.set_tool(Tool::Draw),
             2 => self.set_tool(Tool::Arrow),
-            3 => self.toggle_palette(),
+            3 => self.set_tool(Tool::Rect),
+            4 => self.set_tool(Tool::Ellipse),
+            5 => self.toggle_palette(),
             _ => Outcome::Nothing,
         }
     }
@@ -342,7 +350,7 @@ impl Overlay {
             return None;
         };
         let s = self.scale;
-        let (w, h) = ((BTN * 3.0 + PAD * 4.0) * s, (BTN + PAD * 2.0) * s);
+        let (w, h) = ((BTN * 5.0 + PAD * 6.0) * s, (BTN + PAD * 2.0) * s);
         let gap = 8.0 * s;
         let (fw, fh) = (shot.width() as f32, shot.height() as f32);
         let x = (sel.x + sel.w - w).clamp(0.0, fw - w);
@@ -356,7 +364,7 @@ impl Overlay {
         Rect::from_xywh(x, y, w, h)
     }
 
-    fn button_rects(&self) -> Option<[(Hit, Rect); 3]> {
+    fn button_rects(&self) -> Option<[(Hit, Rect); 5]> {
         let bar = self.toolbar_rect()?;
         let s = self.scale;
         let b = |i: f32| {
@@ -370,7 +378,9 @@ impl Overlay {
         Some([
             (Hit::Tool(Tool::Draw), b(0.0)?),
             (Hit::Tool(Tool::Arrow), b(1.0)?),
-            (Hit::ColorButton, b(2.0)?),
+            (Hit::Tool(Tool::Rect), b(2.0)?),
+            (Hit::Tool(Tool::Ellipse), b(3.0)?),
+            (Hit::ColorButton, b(4.0)?),
         ])
     }
 
@@ -518,6 +528,8 @@ impl Overlay {
                     )
                 }
                 Hit::Tool(Tool::Arrow) => Mark::Arrow(Point::from_xy(x0, y1), Point::from_xy(x1, y0), current),
+                Hit::Tool(Tool::Rect) => Mark::Rect(Point::from_xy(x0, y0), Point::from_xy(x1, y1), current),
+                Hit::Tool(Tool::Ellipse) => Mark::Ellipse(Point::from_xy(x0, y0), Point::from_xy(x1, y1), current),
                 _ => {
                     swatch(frame, r, current, false, s);
                     continue;

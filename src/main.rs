@@ -582,6 +582,8 @@ impl KeyboardHandler for App {
             Keysym::z | Keysym::Z if ctrl => ov.undo(),
             Keysym::a | Keysym::A if !ctrl => ov.set_tool(Tool::Draw),
             Keysym::d | Keysym::D if !ctrl => ov.set_tool(Tool::Arrow),
+            Keysym::q | Keysym::Q if !ctrl => ov.set_tool(Tool::Rect),
+            Keysym::e | Keysym::E if !ctrl => ov.set_tool(Tool::Ellipse),
             k if !ctrl && ov.is_shot() && (Keysym::_1.raw()..=Keysym::_9.raw()).contains(&k.raw()) => {
                 ov.number((k.raw() - Keysym::_0.raw()) as usize)
             }
@@ -628,7 +630,7 @@ impl PointerHandler for App {
                     self.cursor = None;
                     Outcome::Nothing
                 }
-                PointerEventKind::Motion { .. } => ov.motion(p),
+                PointerEventKind::Motion { .. } => ov.motion(p, self.modifiers.shift),
                 PointerEventKind::Press { button: BTN_LEFT, .. } => ov.press(p),
                 PointerEventKind::Release { button: BTN_LEFT, .. } => ov.release(),
                 _ => Outcome::Nothing,
