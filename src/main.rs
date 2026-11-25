@@ -86,6 +86,7 @@ pub struct App {
     pending_record: Option<(i32, i32, u32, u32)>,
     recording: Option<Recording>,
     record_output: Option<wl_output::WlOutput>,
+    audio_probe: Option<std::thread::JoinHandle<Vec<&'static str>>>,
     stopping: bool,
     review: Option<Panel>,
     review_opened: Option<Instant>,
@@ -152,6 +153,7 @@ fn run() -> Result<(), String> {
         pending_record: None,
         recording: None,
         record_output: None,
+        audio_probe: None,
         stopping: false,
         review: None,
         review_opened: None,
@@ -247,6 +249,7 @@ impl App {
         let (layer, viewport) = self.new_layer();
         self.opened_at = Some((started, Duration::ZERO));
         self.overlay = Some(Overlay::new(layer, viewport, Mode::Record));
+        self.audio_probe = Some(std::thread::spawn(record::audio_sources));
     }
 
     fn open_review(&mut self, raw: PathBuf, size: (u32, u32), duration: f32) {
@@ -284,7 +287,10 @@ impl App {
                 eprintln!("ahri: review: {e}");
                 let to = record::final_path(&raw);
                 let _ = std::fs::rename(&raw, &to);
-                self.copy_file(&to);
+                self.notify(
+                    "Falha ao abrir a revisão",
+                    &format!("Gravação salva em {}", to.display()),
+                );
             }
         }
     }
@@ -497,7 +503,12 @@ impl App {
     }
 
     fn begin_recording(&mut self, (x, y, w, h): (i32, i32, u32, u32)) {
-        match Recording::start(x, y, w, h, self.tx.clone()) {
+        let audio = self
+            .audio_probe
+            .take()
+            .and_then(|p| p.join().ok())
+            .unwrap_or_else(record::audio_sources);
+        match Recording::start(x, y, w, h, &audio, self.tx.clone()) {
             Ok(rec) => {
                 eprintln!("ahri: recording {w}x{h}+{x}+{y} -> {}", rec.path.display());
                 self.recording = Some(rec);

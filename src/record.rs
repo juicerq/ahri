@@ -13,7 +13,7 @@ pub struct Recording {
 }
 
 impl Recording {
-    pub fn start(x: i32, y: i32, w: u32, h: u32, tx: Sender<Msg>) -> Result<Self, String> {
+    pub fn start(x: i32, y: i32, w: u32, h: u32, audio: &[&str], tx: Sender<Msg>) -> Result<Self, String> {
         let dir = dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let name = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
@@ -22,7 +22,7 @@ impl Recording {
         let mut child = Command::new("gpu-screen-recorder")
             .args(["-w", &format!("{w}x{h}+{x}+{y}")])
             .args(["-f", "60", "-k", "h264", "-c", "mp4", "-cursor", "yes"])
-            .args(["-a", "default_output", "-a", "default_input"])
+            .args(audio.iter().flat_map(|a| ["-a", a]))
             .args(["-fallback-cpu-encoding", "yes", "-o"])
             .arg(&path)
             .stdin(Stdio::null())
@@ -87,6 +87,22 @@ pub fn export_path(raw: &Path, id: u64) -> PathBuf {
     raw.with_file_name(format!("{EXPORT_PREFIX}{id}.mp4"))
 }
 
+pub fn audio_sources() -> Vec<&'static str> {
+    let listed = Command::new("gpu-screen-recorder")
+        .arg("--list-audio-devices")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let has = |name: &str| listed.lines().any(|l| l.split('|').next() == Some(name));
+    match (has("default_output"), has("default_input")) {
+        (true, true) => vec!["default_output", "default_input"],
+        (true, false) => vec!["default_output"],
+        _ => Vec::new(),
+    }
+}
+
 pub fn recover() {
     let Ok(entries) = std::fs::read_dir(dir()) else { return };
     for entry in entries.flatten() {
@@ -96,6 +112,10 @@ pub fn recover() {
             let _ = std::fs::remove_file(&path);
         } else if name.starts_with(RAW_PREFIX) {
             let to = final_path(&path);
+            if to.exists() {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
             match std::fs::rename(&path, &to) {
                 Ok(()) => eprintln!("ahri: recovered {}", to.display()),
                 Err(e) => eprintln!("ahri: recover {}: {e}", path.display()),

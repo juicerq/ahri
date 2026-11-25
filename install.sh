@@ -8,7 +8,7 @@ if ! command -v gpu-screen-recorder >/dev/null; then
     exit 1
 fi
 
-if ! command -v ffmpeg >/dev/null; then
+if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
     echo "ffmpeg não encontrado. Instale antes: sudo pacman -S ffmpeg" >&2
     exit 1
 fi

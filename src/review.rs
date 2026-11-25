@@ -180,6 +180,7 @@ pub enum Outcome {
 }
 
 pub struct Review {
+    id: u64,
     scale: f32,
     px: (u32, u32),
     lay: Layout,
@@ -187,6 +188,8 @@ pub struct Review {
     base: Pixmap,
     chrome: Pixmap,
     base_dirty: bool,
+    version: u64,
+    committed: u64,
     corners: Vec<u8>,
     source: Source,
     src_size: (u32, u32),
@@ -230,6 +233,7 @@ impl Review {
         let corners = corner_coverage(VIDEO_RADIUS * scale);
 
         let mut review = Self {
+            id: media::next_id(),
             scale,
             px,
             lay,
@@ -237,6 +241,8 @@ impl Review {
             base,
             chrome,
             base_dirty: true,
+            version: 0,
+            committed: 0,
             corners,
             source: Source {
                 path: raw,
@@ -268,7 +274,7 @@ impl Review {
             drag: None,
             tx,
         };
-        media::probe(&review.source.path, review.tx.clone());
+        media::probe(&review.source.path, review.id, review.tx.clone());
         review.start_player(0.0);
         Ok(review)
     }
@@ -294,7 +300,7 @@ impl Review {
 
     fn export_key(&self) -> Settings {
         let mut s = self.settings(self.quality);
-        if s.from <= 0.05 && s.to >= self.source.duration - 0.05 {
+        if !self.source.trimmed(s.from, s.to) {
             s.from = 0.0;
             s.to = f32::MAX;
         }
@@ -311,16 +317,16 @@ impl Review {
         let path = record::export_path(&self.source.path, id);
         let settings = self.settings(self.quality);
         let proc = match media::export(&self.source, &settings, &path, id, self.tx.clone()) {
-            Ok(p) => Some(p),
+            Ok(p) => p,
             Err(e) => {
                 eprintln!("ahri: export: {e}");
-                None
+                return;
             }
         };
         self.export = Some(Export {
             id,
             key,
-            proc,
+            proc: Some(proc),
             path,
             progress: 0.0,
             size: None,
@@ -412,9 +418,9 @@ impl Review {
 
     pub fn media(&mut self, ev: Event) -> Outcome {
         match ev {
-            Event::Frame { id, data } => {
+            Event::Frame { id, index, data } => {
                 let Some(player) = self.player.as_ref().filter(|p| p.id == id) else {
-                    self.recycle(data);
+                    self.pool.recycle(data);
                     return Outcome::Nothing;
                 };
                 if player.still {
@@ -423,39 +429,46 @@ impl Review {
                         self.show_still(at);
                     }
                 } else {
-                    self.frames += 1;
+                    self.frames = index + 1;
                     self.hold_end = false;
                 }
                 if !self.started {
                     self.started = true;
-                    media::load_waves(&self.source.path, self.tx.clone());
+                    media::load_waves(&self.source.path, self.id, self.tx.clone());
                     self.ensure_export();
                 }
                 if let Some(old) = self.frame.replace(data) {
-                    self.recycle(old);
+                    self.pool.recycle(old);
                 }
                 Outcome::Redraw
             }
             Event::Ended { id } => {
-                if self.player.as_ref().is_some_and(|p| p.id == id && !p.still) {
-                    self.player = None;
-                    if self.drag.is_none() {
-                        self.start_player(self.from);
-                        self.hold_end = true;
+                let Some(player) = self.player.take_if(|p| p.id == id) else {
+                    return Outcome::Nothing;
+                };
+                if player.still {
+                    if let Some(at) = self.still_wanted.take() {
+                        self.show_still(at);
                     }
-                    return Outcome::Redraw;
+                    return Outcome::Nothing;
                 }
-                Outcome::Nothing
+                if self.frames == 0 {
+                    self.playing = false;
+                } else if self.drag.is_none() {
+                    self.start_player(self.from);
+                    self.hold_end = true;
+                }
+                Outcome::Redraw
             }
-            Event::Duration { secs } => {
-                if secs > MIN_CLIP && (secs - self.source.duration).abs() > 0.001 {
-                    let full = self.to >= self.source.duration - 0.05;
+            Event::Duration { review, secs } => {
+                if review == self.id && secs > 0.0 && (secs - self.source.duration).abs() > 0.001 {
+                    let full = !self.source.trimmed(self.from, self.to);
                     self.source.duration = secs;
                     if full || self.to > secs {
                         self.to = secs;
                     }
-                    self.from = self.from.min(self.to - MIN_CLIP).max(0.0);
-                    self.pos = self.pos.min(self.to);
+                    self.from = self.clamp_from(self.from);
+                    self.pos = self.pos.clamp(self.from, self.to);
                     if self.started {
                         self.ensure_export();
                     }
@@ -464,8 +477,8 @@ impl Review {
                 }
                 Outcome::Nothing
             }
-            Event::Wave { track, peaks } => {
-                let Some(t) = self.tracks.get_mut(track) else {
+            Event::Wave { review, track, peaks } => {
+                let Some(t) = self.tracks.get_mut(track).filter(|_| review == self.id) else {
                     return Outcome::Nothing;
                 };
                 t.missing = peaks.is_none();
@@ -520,26 +533,17 @@ impl Review {
         }
     }
 
-    fn recycle(&self, buf: Vec<u8>) {
-        if let Ok(mut p) = self.pool.lock()
-            && p.len() < 4
-        {
-            p.push(buf);
-        }
-    }
-
     fn copy(&mut self) -> Outcome {
         if self.copying {
             return Outcome::Nothing;
         }
-        if self.export.is_none() {
-            self.ensure_export();
-        }
-        if self.export.as_ref().is_some_and(|e| e.size.is_some()) {
-            return self.finish();
-        }
-        if self.export.as_ref().is_none_or(|e| e.proc.is_none()) {
+        self.release();
+        self.ensure_export();
+        let Some(export) = &self.export else {
             return Outcome::Failed("não foi possível preparar o vídeo".into());
+        };
+        if export.size.is_some() {
+            return self.finish();
         }
         self.copying = true;
         self.base_dirty = true;
@@ -618,12 +622,20 @@ impl Review {
         self.set_quality(Quality::ALL[n])
     }
 
-    fn set_trim(&mut self, which: Drag, t: f32) {
-        match which {
-            Drag::From => self.from = t.clamp(0.0, (self.to - MIN_CLIP).max(0.0)),
-            Drag::To => self.to = t.clamp((self.from + MIN_CLIP).min(self.source.duration), self.source.duration),
-            Drag::Seek => {}
-        }
+    fn min_clip(&self) -> f32 {
+        MIN_CLIP.min(self.source.duration)
+    }
+
+    fn clamp_from(&self, t: f32) -> f32 {
+        t.clamp(0.0, (self.to - self.min_clip()).max(0.0))
+    }
+
+    fn clamp_to(&self, t: f32) -> f32 {
+        let d = self.source.duration;
+        t.clamp((self.from + self.min_clip()).min(d), d)
+    }
+
+    fn trimmed_changed(&mut self) {
         self.base_dirty = true;
         self.ensure_export();
     }
@@ -659,15 +671,23 @@ impl Review {
             Keysym::Right => self.seek(self.current_pos() + 1.0),
             Keysym::i | Keysym::I if !ctrl => {
                 let t = self.current_pos();
-                self.set_trim(Drag::From, t);
-                self.pos = self.pos.max(self.from);
+                self.from = self.clamp_from(t);
+                self.trimmed_changed();
+                if self.playing {
+                    self.start_player(self.from);
+                } else {
+                    self.pos = self.pos.max(self.from);
+                }
                 Outcome::Redraw
             }
             Keysym::o | Keysym::O if !ctrl => {
                 let t = self.current_pos();
-                self.set_trim(Drag::To, t);
+                self.to = self.clamp_to(t);
+                self.trimmed_changed();
                 if self.playing {
-                    self.start_player(self.current_pos().min(self.to));
+                    self.start_player(t.min(self.to));
+                } else {
+                    self.pos = self.pos.min(self.to);
                 }
                 Outcome::Redraw
             }
@@ -735,7 +755,8 @@ impl Review {
                 self.pause();
             }
             self.drag = Some((d, was_playing));
-            return self.motion(x, y);
+            self.motion(x, y);
+            return Outcome::Redraw;
         }
         if self.lay.video_box.contains(x, y) {
             return self.toggle_play();
@@ -757,16 +778,20 @@ impl Review {
             return Outcome::Nothing;
         };
         let t = self.time_at(x);
+        let before = self.pos;
         match d {
             Drag::From => {
-                self.from = t.clamp(0.0, (self.to - MIN_CLIP).max(0.0));
+                self.from = self.clamp_from(t);
                 self.pos = self.from;
             }
             Drag::To => {
-                self.to = t.clamp((self.from + MIN_CLIP).min(self.source.duration), self.source.duration);
+                self.to = self.clamp_to(t);
                 self.pos = self.to;
             }
             Drag::Seek => self.pos = t.clamp(self.from, self.to),
+        }
+        if self.pos == before {
+            return Outcome::Nothing;
         }
         self.show_still(self.pos);
         Outcome::Redraw
@@ -777,7 +802,7 @@ impl Review {
             return Outcome::Nothing;
         };
         if d != Drag::Seek {
-            self.set_trim(d, if d == Drag::From { self.from } else { self.to });
+            self.trimmed_changed();
             if d == Drag::To {
                 self.pos = self.from;
             }
@@ -799,27 +824,41 @@ impl Review {
         self.px
     }
 
-    pub fn render(&mut self, canvas: &mut [u8]) -> Option<(i32, i32, i32, i32)> {
-        let full = self.base_dirty;
-        if self.base_dirty {
-            self.render_base();
-            self.base_dirty = false;
-        }
-        canvas.copy_from_slice(self.base.data());
-        self.render_dynamic(canvas);
-        if full {
-            return None;
-        }
+    fn dynamic_rect(&self) -> (usize, usize, usize, usize) {
         let s = self.scale;
         let v = self.lay.video_box;
         let b = self.lay.bar.grow(GRAB, 0.0);
-        let rect = R::new(v.x.min(b.x), v.y, v.w.max(b.w), b.bottom() + LABELS_H - v.y);
-        Some((
-            (rect.x * s) as i32 - 1,
-            (rect.y * s) as i32 - 1,
-            (rect.w * s) as i32 + 2,
-            (rect.h * s) as i32 + 2,
-        ))
+        let x0 = ((v.x.min(b.x) * s).floor() as usize).saturating_sub(1);
+        let y0 = ((v.y * s).floor() as usize).saturating_sub(1);
+        let x1 = ((v.right().max(b.right()) * s).ceil() as usize + 1).min(self.px.0 as usize);
+        let y1 = (((b.bottom() + LABELS_H) * s).ceil() as usize + 1).min(self.px.1 as usize);
+        (x0, y0, x1 - x0, y1 - y0)
+    }
+
+    pub fn render(&mut self, canvas: &mut [u8], buffer_version: &mut u64) -> Option<(i32, i32, i32, i32)> {
+        if self.base_dirty {
+            self.render_base();
+            self.base_dirty = false;
+            self.version += 1;
+        }
+        let (x, y, w, h) = self.dynamic_rect();
+        if *buffer_version == self.version {
+            let stride = self.px.0 as usize * 4;
+            let base = self.base.data();
+            for row in y..y + h {
+                let o = row * stride + x * 4;
+                canvas[o..o + w * 4].copy_from_slice(&base[o..o + w * 4]);
+            }
+        } else {
+            canvas.copy_from_slice(self.base.data());
+            *buffer_version = self.version;
+        }
+        self.render_dynamic(canvas);
+        if self.committed == self.version {
+            return Some((x as i32, y as i32, w as i32, h as i32));
+        }
+        self.committed = self.version;
+        None
     }
 
     fn render_dynamic(&self, data: &mut [u8]) {
@@ -1458,7 +1497,7 @@ pub struct Panel {
     pub frame_pending: bool,
     pub dirty: bool,
     pub configured: bool,
-    buffers: Vec<Buffer>,
+    buffers: Vec<(Buffer, u64)>,
 }
 
 impl Panel {
@@ -1479,22 +1518,21 @@ impl Panel {
 
     pub fn present(&mut self, pool: &mut SlotPool) -> Result<(), String> {
         let (w, h) = self.review.pixels();
-        let idx = match (0..self.buffers.len()).find(|&i| self.buffers[i].canvas(pool).is_some()) {
+        let idx = match (0..self.buffers.len()).find(|&i| self.buffers[i].0.canvas(pool).is_some()) {
             Some(i) => i,
             None => {
                 let (buffer, _) = pool
                     .create_buffer(w as i32, h as i32, w as i32 * 4, wl_shm::Format::Argb8888)
                     .map_err(|e| format!("create buffer: {e}"))?;
-                self.buffers.push(buffer);
+                self.buffers.push((buffer, u64::MAX));
                 self.buffers.len() - 1
             }
         };
-        let canvas = self.buffers[idx].canvas(pool).ok_or("buffer busy")?;
-        let damage = self.review.render(canvas);
+        let (buffer, version) = &mut self.buffers[idx];
+        let canvas = buffer.canvas(pool).ok_or("buffer busy")?;
+        let damage = self.review.render(canvas, version);
         let surface = self.layer.wl_surface();
-        self.buffers[idx]
-            .attach_to(surface)
-            .map_err(|e| format!("attach: {e:?}"))?;
+        buffer.attach_to(surface).map_err(|e| format!("attach: {e:?}"))?;
         let (x, y, dw, dh) = damage.unwrap_or((0, 0, w as i32, h as i32));
         surface.damage_buffer(x, y, dw, dh);
         Ok(())

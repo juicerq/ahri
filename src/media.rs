@@ -2,7 +2,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -18,12 +18,31 @@ const MIC: usize = 1;
 const DENOISE: &str = "highpass=f=80,afftdn=nr=12:nf=-35";
 
 pub enum Event {
-    Frame { id: u64, data: Vec<u8> },
-    Ended { id: u64 },
-    Wave { track: usize, peaks: Option<Vec<f32>> },
-    Duration { secs: f32 },
-    Progress { id: u64, done: f32 },
-    Exported { id: u64, result: Result<u64, String> },
+    Frame {
+        id: u64,
+        index: u32,
+        data: Vec<u8>,
+    },
+    Ended {
+        id: u64,
+    },
+    Wave {
+        review: u64,
+        track: usize,
+        peaks: Option<Vec<f32>>,
+    },
+    Duration {
+        review: u64,
+        secs: f32,
+    },
+    Progress {
+        id: u64,
+        done: f32,
+    },
+    Exported {
+        id: u64,
+        result: Result<u64, String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,8 +84,8 @@ impl Source {
         (total - 220_000.0).max(60_000.0)
     }
 
-    fn trimmed(&self, s: &Settings) -> bool {
-        s.from > 0.05 || s.to < self.duration - 0.05
+    pub fn trimmed(&self, from: f32, to: f32) -> bool {
+        from > 0.001 || to < self.duration - 0.001
     }
 
     fn target_bps(&self, q: Quality) -> f32 {
@@ -93,7 +112,7 @@ impl Source {
 
     pub fn export_args(&self, s: &Settings, out: &Path) -> Vec<String> {
         let mut a: Vec<String> = ["-nostdin", "-v", "error", "-y"].map(String::from).to_vec();
-        let trimmed = self.trimmed(s);
+        let trimmed = self.trimmed(s.from, s.to);
         if trimmed {
             a.extend(["-ss".into(), secs(s.from), "-t".into(), secs(s.to - s.from)]);
         }
@@ -206,7 +225,26 @@ impl Proc {
     }
 }
 
-pub type FramePool = Arc<Mutex<Vec<Vec<u8>>>>;
+const MAX_PENDING: usize = 3;
+
+#[derive(Default)]
+pub struct Frames {
+    free: Mutex<Vec<Vec<u8>>>,
+    pending: AtomicUsize,
+}
+
+impl Frames {
+    pub fn recycle(&self, buf: Vec<u8>) {
+        self.pending.fetch_sub(1, Ordering::Relaxed);
+        if let Ok(mut free) = self.free.lock()
+            && free.len() < MAX_PENDING
+        {
+            free.push(buf);
+        }
+    }
+}
+
+pub type FramePool = Arc<Frames>;
 
 pub struct PlayRequest<'a> {
     pub path: &'a Path,
@@ -220,9 +258,6 @@ pub struct PlayRequest<'a> {
 pub fn play(req: PlayRequest, id: u64, pool: FramePool, tx: Sender<Msg>) -> Result<Proc, String> {
     let (w, h) = req.size;
     let mut a: Vec<String> = ["-nostdin", "-v", "error"].map(String::from).to_vec();
-    if !req.still {
-        a.push("-re".into());
-    }
     a.extend([
         "-ss".into(),
         secs(req.from),
@@ -232,7 +267,12 @@ pub fn play(req: PlayRequest, id: u64, pool: FramePool, tx: Sender<Msg>) -> Resu
         req.path.to_string_lossy().into_owned(),
     ]);
     let audio = if req.still { None } else { audio_graph(req.tracks) };
-    let mut graph = format!("[0:v:0]fps={PREVIEW_FPS},scale={w}:{h}:flags=bilinear,format=bgra[v]");
+    let pace = if req.still {
+        String::new()
+    } else {
+        format!("fps={PREVIEW_FPS},")
+    };
+    let mut graph = format!("[0:v:0]{pace}scale={w}:{h}:flags=bilinear,format=bgra[v]");
     if let Some(g) = &audio {
         graph.push(';');
         graph.push_str(g);
@@ -254,17 +294,21 @@ pub fn play(req: PlayRequest, id: u64, pool: FramePool, tx: Sender<Msg>) -> Resu
     let len = w as usize * h as usize * 4;
     std::thread::spawn(move || {
         let mut start = None;
-        for n in 0u32.. {
-            let mut buf = pool.lock().ok().and_then(|mut p| p.pop()).unwrap_or_default();
+        for index in 0u32.. {
+            let mut buf = pool.free.lock().ok().and_then(|mut p| p.pop()).unwrap_or_default();
             buf.resize(len, 0);
             if stdout.read_exact(&mut buf).is_err() {
                 break;
             }
             if !still {
-                let due = *start.get_or_insert_with(Instant::now) + Duration::from_secs_f32(n as f32 / PREVIEW_FPS);
+                let due = *start.get_or_insert_with(Instant::now) + Duration::from_secs_f32(index as f32 / PREVIEW_FPS);
                 std::thread::sleep(due.saturating_duration_since(Instant::now()));
             }
-            if tx.send(Msg::Media(Event::Frame { id, data: buf })).is_err() {
+            if pool.pending.fetch_add(1, Ordering::Relaxed) >= MAX_PENDING {
+                pool.recycle(buf);
+                continue;
+            }
+            if tx.send(Msg::Media(Event::Frame { id, index, data: buf })).is_err() {
                 return;
             }
         }
@@ -273,14 +317,12 @@ pub fn play(req: PlayRequest, id: u64, pool: FramePool, tx: Sender<Msg>) -> Resu
         if !err.is_empty() && status.is_ok_and(|s| !s.success() && s.code().is_some()) {
             eprintln!("ahri: preview: {err}");
         }
-        if !still {
-            let _ = tx.send(Msg::Media(Event::Ended { id }));
-        }
+        let _ = tx.send(Msg::Media(Event::Ended { id }));
     });
     Ok(Proc { pid })
 }
 
-pub fn load_waves(path: &Path, tx: Sender<Msg>) {
+pub fn load_waves(path: &Path, review: u64, tx: Sender<Msg>) {
     for track in 0..TRACKS {
         let path = path.to_path_buf();
         let tx = tx.clone();
@@ -288,12 +330,12 @@ pub fn load_waves(path: &Path, tx: Sender<Msg>) {
             let peaks = wave(&path, track)
                 .map_err(|e| eprintln!("ahri: wave {track}: {e}"))
                 .ok();
-            let _ = tx.send(Msg::Media(Event::Wave { track, peaks }));
+            let _ = tx.send(Msg::Media(Event::Wave { review, track, peaks }));
         });
     }
 }
 
-pub fn probe(path: &Path, tx: Sender<Msg>) {
+pub fn probe(path: &Path, review: u64, tx: Sender<Msg>) {
     let path = path.to_path_buf();
     std::thread::spawn(move || {
         let out = Command::new("ffprobe")
@@ -316,7 +358,7 @@ pub fn probe(path: &Path, tx: Sender<Msg>) {
             .and_then(|s| s.trim().parse::<f32>().ok());
         match secs {
             Some(secs) if secs > 0.0 => {
-                let _ = tx.send(Msg::Media(Event::Duration { secs }));
+                let _ = tx.send(Msg::Media(Event::Duration { review, secs }));
             }
             _ => eprintln!("ahri: probe {}: no video duration", path.display()),
         }
@@ -355,19 +397,19 @@ fn wave(path: &Path, track: usize) -> Result<Vec<f32>, String> {
     if !status.success() || raw.is_empty() {
         return Err(err);
     }
-    let samples: Vec<i16> = raw.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b)).collect();
-    Ok(peaks(&samples, WAVE_BUCKETS))
+    Ok(peaks(raw.as_chunks::<2>().0, WAVE_BUCKETS))
 }
 
-pub fn peaks(samples: &[i16], buckets: usize) -> Vec<f32> {
-    if samples.is_empty() {
-        return vec![0.0; buckets];
-    }
+fn peaks(samples: &[[u8; 2]], buckets: usize) -> Vec<f32> {
     (0..buckets)
         .map(|b| {
             let start = b * samples.len() / buckets;
             let end = ((b + 1) * samples.len() / buckets).max(start + 1).min(samples.len());
-            let peak = samples[start..end].iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+            let peak = samples[start..end]
+                .iter()
+                .map(|s| i16::from_le_bytes(*s).unsigned_abs())
+                .max()
+                .unwrap_or(0);
             peak as f32 / 32768.0
         })
         .collect()
@@ -467,8 +509,7 @@ mod tests {
 
     #[test]
     fn peaks_keep_loudest_sample_per_bucket() {
-        let samples = [0, 100, -32768, 5, 16384, 0];
+        let samples = [0i16, 100, -32768, 5, 16384, 0].map(i16::to_le_bytes);
         assert_eq!(peaks(&samples, 3), vec![100.0 / 32768.0, 1.0, 0.5]);
-        assert_eq!(peaks(&[], 2), vec![0.0, 0.0]);
     }
 }
