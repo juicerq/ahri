@@ -285,9 +285,8 @@ impl App {
                 viewport.destroy();
                 drop(layer);
                 eprintln!("ahri: review: {e}");
-                let to = record::final_path(&raw);
-                let body = match std::fs::rename(&raw, &to) {
-                    Ok(()) => format!("Gravação salva em {}", to.display()),
+                let body = match record::publish(&raw, &raw) {
+                    Ok(to) => format!("Gravação salva em {}", to.display()),
                     Err(err) => format!("Gravação mantida em {}: {err}", raw.display()),
                 };
                 self.notify("Falha ao abrir a revisão", &body);
@@ -509,7 +508,7 @@ impl App {
             .filter(|p| p.is_finished())
             .and_then(|p| p.join().ok())
             .unwrap_or_default();
-        match Recording::start(x, y, w, h, &audio, self.tx.clone()) {
+        match Recording::start(x, y, w, h, audio, self.tx.clone()) {
             Ok(rec) => {
                 eprintln!("ahri: recording {w}x{h}+{x}+{y} -> {}", rec.path.display());
                 self.recording = Some(rec);

@@ -1,69 +1,112 @@
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 
 use crate::Msg;
 
 pub struct Recording {
-    pid: i32,
+    pid: Arc<AtomicI32>,
+    stopped: Arc<AtomicBool>,
     pub path: PathBuf,
     pub size: (u32, u32),
-    pub started: std::time::Instant,
+    pub started: Instant,
 }
 
 impl Recording {
-    pub fn start(x: i32, y: i32, w: u32, h: u32, audio: &[&str], tx: Sender<Msg>) -> Result<Self, String> {
+    pub fn start(x: i32, y: i32, w: u32, h: u32, audio: Vec<&'static str>, tx: Sender<Msg>) -> Result<Self, String> {
         let dir = dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let name = unused(&dir, &chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string());
         let path = dir.join(format!("{RAW_PREFIX}{name}.mp4"));
+        let region = format!("{w}x{h}+{x}+{y}");
 
-        let mut child = Command::new("gpu-screen-recorder")
-            .args(["-w", &format!("{w}x{h}+{x}+{y}")])
-            .args(["-f", "60", "-k", "h264", "-c", "mp4", "-cursor", "yes"])
-            .args(audio.iter().flat_map(|a| ["-a", a]))
-            .args(["-fallback-cpu-encoding", "yes", "-o"])
-            .arg(&path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("gpu-screen-recorder: {e}"))?;
-
-        let pid = child.id() as i32;
-        let stderr = child.stderr.take().expect("stderr is piped");
-        let out = path.clone();
+        let child = spawn(&region, &audio, &path).map_err(|e| format!("gpu-screen-recorder: {e}"))?;
+        let pid = Arc::new(AtomicI32::new(child.id() as i32));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let (out, thread_pid, thread_stopped) = (path.clone(), pid.clone(), stopped.clone());
         std::thread::spawn(move || {
-            use std::io::BufRead;
-            let last = std::io::BufReader::new(stderr)
-                .lines()
-                .map_while(Result::ok)
-                .filter(|l| l.contains("error"))
-                .last()
-                .unwrap_or_default();
-            let status = child.wait();
-            let ok = status.as_ref().is_ok_and(|s| s.success()) && out.metadata().is_ok_and(|m| m.len() > 0);
-            let result = if ok {
-                Ok(out)
-            } else {
-                Err(format!("gpu-screen-recorder {status:?} {last}"))
-            };
-            let _ = tx.send(Msg::RecordingDone(result));
+            let (mut child, mut audio) = (child, audio);
+            loop {
+                let began = Instant::now();
+                let last = last_error(&mut child);
+                let status = child.wait();
+                let ok = status.as_ref().is_ok_and(|s| s.success()) && out.metadata().is_ok_and(|m| m.len() > 0);
+                let retry = !ok
+                    && !audio.is_empty()
+                    && began.elapsed() < AUDIO_RETRY_WINDOW
+                    && !thread_stopped.load(Ordering::Relaxed);
+                if retry {
+                    eprintln!("ahri: recorder failed with audio ({last}), retrying without audio");
+                    audio.clear();
+                    if let Ok(next) = spawn(&region, &audio, &out) {
+                        thread_pid.store(next.id() as i32, Ordering::Relaxed);
+                        child = next;
+                        if thread_stopped.load(Ordering::Relaxed) {
+                            interrupt(&thread_pid);
+                        }
+                        continue;
+                    }
+                }
+                let result = if ok {
+                    Ok(out)
+                } else {
+                    Err(format!("gpu-screen-recorder {status:?} {last}"))
+                };
+                let _ = tx.send(Msg::RecordingDone(result));
+                return;
+            }
         });
 
         Ok(Self {
             pid,
+            stopped,
             path,
             size: (w, h),
-            started: std::time::Instant::now(),
+            started: Instant::now(),
         })
     }
 
     pub fn stop(&self) {
-        unsafe {
-            libc::kill(self.pid, libc::SIGINT);
-        }
+        self.stopped.store(true, Ordering::Relaxed);
+        interrupt(&self.pid);
+    }
+}
+
+const AUDIO_RETRY_WINDOW: Duration = Duration::from_secs(3);
+
+fn spawn(region: &str, audio: &[&str], path: &Path) -> std::io::Result<Child> {
+    Command::new("gpu-screen-recorder")
+        .args(["-w", region])
+        .args(["-f", "60", "-k", "h264", "-c", "mp4", "-cursor", "yes"])
+        .args(audio.iter().flat_map(|a| ["-a", a]))
+        .args(["-fallback-cpu-encoding", "yes", "-o"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+}
+
+fn last_error(child: &mut Child) -> String {
+    use std::io::BufRead;
+    let Some(stderr) = child.stderr.take() else {
+        return String::new();
+    };
+    std::io::BufReader::new(stderr)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|l| l.contains("error"))
+        .last()
+        .unwrap_or_default()
+}
+
+fn interrupt(pid: &AtomicI32) {
+    unsafe {
+        libc::kill(pid.load(Ordering::Relaxed), libc::SIGINT);
     }
 }
 
@@ -74,13 +117,32 @@ pub fn dir() -> PathBuf {
     videos_dir().join("Ahri")
 }
 
-pub fn final_path(raw: &Path) -> PathBuf {
+pub fn publish(src: &Path, raw: &Path) -> std::io::Result<PathBuf> {
     let name = raw
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let stem = name.strip_prefix(RAW_PREFIX).unwrap_or(&name);
-    raw.with_file_name(format!("ahri_{stem}"))
+    let stem = name.trim_start_matches(RAW_PREFIX).trim_end_matches(".mp4");
+    for n in 1.. {
+        let dst = raw.with_file_name(if n == 1 {
+            format!("ahri_{stem}.mp4")
+        } else {
+            format!("ahri_{stem}-{n}.mp4")
+        });
+        match std::fs::hard_link(src, &dst) {
+            Ok(()) => {
+                std::fs::remove_file(src)?;
+                return Ok(dst);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) if !dst.exists() => {
+                std::fs::rename(src, &dst)?;
+                return Ok(dst);
+            }
+            Err(_) => {}
+        }
+    }
+    unreachable!()
 }
 
 pub fn export_path(raw: &Path, id: u64) -> PathBuf {
@@ -111,13 +173,8 @@ pub fn recover() {
         if name.starts_with(EXPORT_PREFIX) {
             let _ = std::fs::remove_file(&path);
         } else if name.starts_with(RAW_PREFIX) {
-            let mut to = final_path(&path);
-            if to.exists() {
-                let stem = name.trim_start_matches(RAW_PREFIX).trim_end_matches(".mp4");
-                to = to.with_file_name(format!("ahri_{}.mp4", unused(&dir(), stem)));
-            }
-            match std::fs::rename(&path, &to) {
-                Ok(()) => eprintln!("ahri: recovered {}", to.display()),
+            match publish(&path, &path) {
+                Ok(to) => eprintln!("ahri: recovered {}", to.display()),
                 Err(e) => eprintln!("ahri: recover {}: {e}", path.display()),
             }
         }
@@ -155,10 +212,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn raw_names_map_to_final_and_export_names() {
-        let raw = Path::new("/v/Ahri/.ahri-raw-2026-11-25_12-00-00.mp4");
-        assert_eq!(final_path(raw), Path::new("/v/Ahri/ahri_2026-11-25_12-00-00.mp4"));
-        assert_eq!(export_path(raw, 7), Path::new("/v/Ahri/.ahri-export-7.mp4"));
+    fn publish_never_replaces_an_existing_video() {
+        let dir = std::env::temp_dir().join(format!("ahri-publish-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join(".ahri-raw-t.mp4");
+        let export = export_path(&raw, 7);
+        assert_eq!(export, dir.join(".ahri-export-7.mp4"));
+        std::fs::write(dir.join("ahri_t.mp4"), b"old").unwrap();
+        std::fs::write(&export, b"new").unwrap();
+        let out = publish(&export, &raw).unwrap();
+        assert_eq!(out, dir.join("ahri_t-2.mp4"));
+        assert_eq!(std::fs::read(dir.join("ahri_t.mp4")).unwrap(), b"old");
+        assert_eq!(std::fs::read(&out).unwrap(), b"new");
+        assert!(!export.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

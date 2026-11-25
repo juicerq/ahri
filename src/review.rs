@@ -555,11 +555,13 @@ impl Review {
             return Outcome::Nothing;
         };
         self.stop_player();
-        let out = record::final_path(&self.source.path);
-        if let Err(e) = std::fs::rename(&export.path, &out) {
-            self.copying = false;
-            return Outcome::Failed(format!("{}: {e}", out.display()));
-        }
+        let out = match record::publish(&export.path, &self.source.path) {
+            Ok(out) => out,
+            Err(e) => {
+                self.copying = false;
+                return Outcome::Failed(format!("{}: {e}", export.path.display()));
+            }
+        };
         let _ = std::fs::remove_file(&self.source.path);
         Outcome::Copied(out)
     }
@@ -567,8 +569,7 @@ impl Review {
     pub fn keep(&mut self) {
         self.stop_player();
         self.cancel_export();
-        let to = record::final_path(&self.source.path);
-        if let Err(e) = std::fs::rename(&self.source.path, &to) {
+        if let Err(e) = record::publish(&self.source.path, &self.source.path) {
             eprintln!("ahri: keep {}: {e}", self.source.path.display());
         }
     }
