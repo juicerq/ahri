@@ -508,7 +508,7 @@ impl App {
             .take()
             .filter(|p| p.is_finished())
             .and_then(|p| p.join().ok())
-            .unwrap_or_else(|| record::DEFAULT_AUDIO.to_vec());
+            .unwrap_or_default();
         match Recording::start(x, y, w, h, &audio, self.tx.clone()) {
             Ok(rec) => {
                 eprintln!("ahri: recording {w}x{h}+{x}+{y} -> {}", rec.path.display());

@@ -16,7 +16,7 @@ impl Recording {
     pub fn start(x: i32, y: i32, w: u32, h: u32, audio: &[&str], tx: Sender<Msg>) -> Result<Self, String> {
         let dir = dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let name = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+        let name = unused(&dir, &chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string());
         let path = dir.join(format!("{RAW_PREFIX}{name}.mp4"));
 
         let mut child = Command::new("gpu-screen-recorder")
@@ -87,8 +87,6 @@ pub fn export_path(raw: &Path, id: u64) -> PathBuf {
     raw.with_file_name(format!("{EXPORT_PREFIX}{id}.mp4"))
 }
 
-pub const DEFAULT_AUDIO: [&str; 2] = ["default_output", "default_input"];
-
 pub fn audio_sources() -> Vec<&'static str> {
     let listed = Command::new("gpu-screen-recorder")
         .arg("--list-audio-devices")
@@ -99,7 +97,7 @@ pub fn audio_sources() -> Vec<&'static str> {
         .unwrap_or_default();
     let has = |name: &str| listed.lines().any(|l| l.split('|').next() == Some(name));
     match (has("default_output"), has("default_input")) {
-        (true, true) => DEFAULT_AUDIO.to_vec(),
+        (true, true) => vec!["default_output", "default_input"],
         (true, false) => vec!["default_output"],
         _ => Vec::new(),
     }
@@ -113,10 +111,10 @@ pub fn recover() {
         if name.starts_with(EXPORT_PREFIX) {
             let _ = std::fs::remove_file(&path);
         } else if name.starts_with(RAW_PREFIX) {
-            let to = final_path(&path);
-            if to.is_file() {
-                let _ = std::fs::remove_file(&path);
-                continue;
+            let mut to = final_path(&path);
+            if to.exists() {
+                let stem = name.trim_start_matches(RAW_PREFIX).trim_end_matches(".mp4");
+                to = to.with_file_name(format!("ahri_{}.mp4", unused(&dir(), stem)));
             }
             match std::fs::rename(&path, &to) {
                 Ok(()) => eprintln!("ahri: recovered {}", to.display()),
@@ -124,6 +122,19 @@ pub fn recover() {
             }
         }
     }
+}
+
+fn unused(dir: &Path, stem: &str) -> String {
+    (1..)
+        .map(|n| {
+            if n == 1 {
+                stem.to_string()
+            } else {
+                format!("{stem}-{n}")
+            }
+        })
+        .find(|s| !dir.join(format!("{RAW_PREFIX}{s}.mp4")).exists() && !dir.join(format!("ahri_{s}.mp4")).exists())
+        .unwrap_or_default()
 }
 
 fn videos_dir() -> PathBuf {
@@ -148,5 +159,16 @@ mod tests {
         let raw = Path::new("/v/Ahri/.ahri-raw-2026-11-25_12-00-00.mp4");
         assert_eq!(final_path(raw), Path::new("/v/Ahri/ahri_2026-11-25_12-00-00.mp4"));
         assert_eq!(export_path(raw, 7), Path::new("/v/Ahri/.ahri-export-7.mp4"));
+    }
+
+    #[test]
+    fn unused_skips_names_taken_by_raw_or_final_files() {
+        let dir = std::env::temp_dir().join(format!("ahri-unused-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(unused(&dir, "t"), "t");
+        std::fs::write(dir.join("ahri_t.mp4"), b"").unwrap();
+        std::fs::write(dir.join(".ahri-raw-t-2.mp4"), b"").unwrap();
+        assert_eq!(unused(&dir, "t"), "t-3");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
