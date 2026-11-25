@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 
@@ -31,31 +31,27 @@ impl Recording {
         std::thread::spawn(move || {
             let (mut child, mut audio) = (child, audio);
             loop {
-                let began = Instant::now();
                 let last = last_error(&mut child);
                 let status = child.wait();
-                let ok = status.as_ref().is_ok_and(|s| s.success()) && out.metadata().is_ok_and(|m| m.len() > 0);
-                let retry = !ok
-                    && !audio.is_empty()
-                    && began.elapsed() < AUDIO_RETRY_WINDOW
-                    && !thread_stopped.load(Ordering::Relaxed);
-                if retry {
+                let written = out.metadata().is_ok_and(|m| m.len() > 0);
+                let ok = status.as_ref().is_ok_and(|s| s.success()) && written;
+                let mut error = format!("gpu-screen-recorder {status:?} {last}");
+                if !ok && !written && !audio.is_empty() && !thread_stopped.load(Ordering::SeqCst) {
                     eprintln!("ahri: recorder failed with audio ({last}), retrying without audio");
                     audio.clear();
-                    if let Ok(next) = spawn(&region, &audio, &out) {
-                        thread_pid.store(next.id() as i32, Ordering::Relaxed);
-                        child = next;
-                        if thread_stopped.load(Ordering::Relaxed) {
-                            interrupt(&thread_pid);
+                    match spawn(&region, &audio, &out) {
+                        Ok(next) => {
+                            thread_pid.store(next.id() as i32, Ordering::SeqCst);
+                            child = next;
+                            if thread_stopped.load(Ordering::SeqCst) {
+                                interrupt(&thread_pid);
+                            }
+                            continue;
                         }
-                        continue;
+                        Err(e) => error = format!("gpu-screen-recorder: {e}"),
                     }
                 }
-                let result = if ok {
-                    Ok(out)
-                } else {
-                    Err(format!("gpu-screen-recorder {status:?} {last}"))
-                };
+                let result = if ok { Ok(out) } else { Err(error) };
                 let _ = tx.send(Msg::RecordingDone(result));
                 return;
             }
@@ -71,12 +67,10 @@ impl Recording {
     }
 
     pub fn stop(&self) {
-        self.stopped.store(true, Ordering::Relaxed);
+        self.stopped.store(true, Ordering::SeqCst);
         interrupt(&self.pid);
     }
 }
-
-const AUDIO_RETRY_WINDOW: Duration = Duration::from_secs(3);
 
 fn spawn(region: &str, audio: &[&str], path: &Path) -> std::io::Result<Child> {
     Command::new("gpu-screen-recorder")
@@ -106,7 +100,7 @@ fn last_error(child: &mut Child) -> String {
 
 fn interrupt(pid: &AtomicI32) {
     unsafe {
-        libc::kill(pid.load(Ordering::Relaxed), libc::SIGINT);
+        libc::kill(pid.load(Ordering::SeqCst), libc::SIGINT);
     }
 }
 
@@ -129,20 +123,37 @@ pub fn publish(src: &Path, raw: &Path) -> std::io::Result<PathBuf> {
         } else {
             format!("ahri_{stem}-{n}.mp4")
         });
-        match std::fs::hard_link(src, &dst) {
-            Ok(()) => {
-                std::fs::remove_file(src)?;
-                return Ok(dst);
-            }
+        match move_new(src, &dst) {
+            Ok(()) => return Ok(dst),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) if !dst.exists() => {
-                std::fs::rename(src, &dst)?;
-                return Ok(dst);
-            }
-            Err(_) => {}
+            Err(e) => return Err(e),
         }
     }
     unreachable!()
+}
+
+fn move_new(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(std::io::Error::other);
+    let (from, to) = (c(src)?, c(dst)?);
+    let moved = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if moved == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() != Some(libc::EINVAL) {
+        return Err(err);
+    }
+    std::fs::hard_link(src, dst)?;
+    std::fs::remove_file(src)
 }
 
 pub fn export_path(raw: &Path, id: u64) -> PathBuf {
