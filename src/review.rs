@@ -461,7 +461,7 @@ impl Review {
                 Outcome::Redraw
             }
             Event::Duration { review, secs } => {
-                if review == self.id && secs > 0.0 && (secs - self.source.duration).abs() > 0.001 {
+                if review == self.id && (secs - self.source.duration).abs() > 0.001 {
                     let full = !self.source.trimmed(self.from, self.to);
                     self.source.duration = secs;
                     if full || self.to > secs {
@@ -845,9 +845,17 @@ impl Review {
         if *buffer_version == self.version {
             let stride = self.px.0 as usize * 4;
             let base = self.base.data();
+            let (vx, vy, vw, vh) = self.video_px;
+            let covered = self.frame.as_ref().is_some_and(|f| f.len() == vw * vh * 4);
             for row in y..y + h {
-                let o = row * stride + x * 4;
-                canvas[o..o + w * 4].copy_from_slice(&base[o..o + w * 4]);
+                let o = row * stride;
+                if covered && (vy..vy + vh).contains(&row) {
+                    canvas[o + x * 4..o + vx * 4].copy_from_slice(&base[o + x * 4..o + vx * 4]);
+                    let (r0, r1) = (o + (vx + vw) * 4, o + (x + w) * 4);
+                    canvas[r0..r1].copy_from_slice(&base[r0..r1]);
+                } else {
+                    canvas[o + x * 4..o + (x + w) * 4].copy_from_slice(&base[o + x * 4..o + (x + w) * 4]);
+                }
             }
         } else {
             canvas.copy_from_slice(self.base.data());

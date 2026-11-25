@@ -87,6 +87,8 @@ pub fn export_path(raw: &Path, id: u64) -> PathBuf {
     raw.with_file_name(format!("{EXPORT_PREFIX}{id}.mp4"))
 }
 
+pub const DEFAULT_AUDIO: [&str; 2] = ["default_output", "default_input"];
+
 pub fn audio_sources() -> Vec<&'static str> {
     let listed = Command::new("gpu-screen-recorder")
         .arg("--list-audio-devices")
@@ -97,7 +99,7 @@ pub fn audio_sources() -> Vec<&'static str> {
         .unwrap_or_default();
     let has = |name: &str| listed.lines().any(|l| l.split('|').next() == Some(name));
     match (has("default_output"), has("default_input")) {
-        (true, true) => vec!["default_output", "default_input"],
+        (true, true) => DEFAULT_AUDIO.to_vec(),
         (true, false) => vec!["default_output"],
         _ => Vec::new(),
     }
@@ -112,7 +114,7 @@ pub fn recover() {
             let _ = std::fs::remove_file(&path);
         } else if name.starts_with(RAW_PREFIX) {
             let to = final_path(&path);
-            if to.exists() {
+            if to.is_file() {
                 let _ = std::fs::remove_file(&path);
                 continue;
             }

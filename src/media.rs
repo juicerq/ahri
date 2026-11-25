@@ -235,7 +235,9 @@ pub struct Frames {
 
 impl Frames {
     pub fn recycle(&self, buf: Vec<u8>) {
-        self.pending.fetch_sub(1, Ordering::Relaxed);
+        let _ = self
+            .pending
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| Some(n.saturating_sub(1)));
         if let Ok(mut free) = self.free.lock()
             && free.len() < MAX_PENDING
         {
