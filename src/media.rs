@@ -12,6 +12,8 @@ use crate::Msg;
 
 pub const WAVE_BUCKETS: usize = 240;
 pub const PREVIEW_FPS: f32 = 60.0;
+pub const RECORD_FPS: u32 = 120;
+pub const FPS: [u32; 3] = [30, 60, 120];
 const WAVE_RATE: usize = 8000;
 const TRACKS: usize = 2;
 const MIC: usize = 1;
@@ -31,9 +33,10 @@ pub enum Event {
         track: usize,
         peaks: Option<Vec<f32>>,
     },
-    Duration {
+    Probed {
         review: u64,
-        secs: f32,
+        secs: Option<f32>,
+        fps: Option<f32>,
     },
     Progress {
         id: u64,
@@ -68,6 +71,7 @@ impl Quality {
 pub struct Settings {
     pub tracks: Vec<bool>,
     pub quality: Quality,
+    pub fps: u32,
     pub from: f32,
     pub to: f32,
 }
@@ -76,6 +80,7 @@ pub struct Source {
     pub path: PathBuf,
     pub duration: f32,
     pub bytes: u64,
+    pub fps: f32,
 }
 
 impl Source {
@@ -88,11 +93,17 @@ impl Source {
         from > 0.001 || to < self.duration - 0.001
     }
 
-    fn target_bps(&self, q: Quality) -> f32 {
+    fn reduces_fps(fps: u32) -> bool {
+        fps < RECORD_FPS
+    }
+
+    fn target_bps(&self, q: Quality, fps: u32) -> f32 {
+        let src = self.fps.max(1.0);
+        let bps = self.video_bps() * ((fps as f32).min(src) / src).powf(0.7);
         match q {
-            Quality::Original => self.video_bps(),
-            Quality::Light => (self.video_bps() * 0.6).clamp(150_000.0, 2_500_000.0),
-            Quality::Minimal => (self.video_bps() * 0.3).clamp(80_000.0, 900_000.0),
+            Quality::Original => bps,
+            Quality::Light => (bps * 0.6).clamp(150_000.0, 2_500_000.0),
+            Quality::Minimal => (bps * 0.3).clamp(80_000.0, 900_000.0),
         }
     }
 
@@ -107,7 +118,7 @@ impl Source {
         } else {
             0.0
         };
-        ((self.target_bps(s.quality) + audio) * secs / 8.0) as u64
+        ((self.target_bps(s.quality, s.fps) + audio) * secs / 8.0) as u64
     }
 
     pub fn export_args(&self, s: &Settings, out: &Path) -> Vec<String> {
@@ -129,20 +140,24 @@ impl Source {
             ]
         };
         let x264 = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"].map(String::from);
-        match (s.quality, trimmed) {
-            (Quality::Original, false) => a.extend(["-c:v", "copy"].map(String::from)),
-            (Quality::Original, true) => {
-                a.extend(x264);
-                a.extend(["-crf", "18"].map(String::from));
+        let reduced = Self::reduces_fps(s.fps);
+        if s.quality == Quality::Original && !trimmed && !reduced {
+            a.extend(["-c:v", "copy"].map(String::from));
+        } else {
+            let mut vf = Vec::new();
+            if reduced {
+                vf.push(format!("fps={}", s.fps));
             }
-            (Quality::Light, _) => {
-                a.extend(x264);
-                a.extend(rate(self.target_bps(Quality::Light)));
+            if s.quality == Quality::Minimal {
+                vf.push("scale=w='min(iw,1280)':h=-2".into());
             }
-            (Quality::Minimal, _) => {
-                a.extend(["-vf", "fps=30,scale=w='min(iw,1280)':h=-2"].map(String::from));
-                a.extend(x264);
-                a.extend(rate(self.target_bps(Quality::Minimal)));
+            if !vf.is_empty() {
+                a.extend(["-vf".into(), vf.join(",")]);
+            }
+            a.extend(x264);
+            match s.quality {
+                Quality::Original => a.extend(["-crf", "18"].map(String::from)),
+                q => a.extend(rate(self.target_bps(q, s.fps))),
             }
         }
         match audio_graph(&s.tracks) {
@@ -347,24 +362,41 @@ pub fn probe(path: &Path, review: u64, tx: Sender<Msg>) {
                 "-select_streams",
                 "v:0",
                 "-show_entries",
-                "stream=duration",
+                "stream=duration,avg_frame_rate",
                 "-of",
-                "csv=p=0",
+                "default=noprint_wrappers=1",
             ])
             .arg(&path)
             .stdin(Stdio::null())
             .output();
-        let secs = out
+        let text = out
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
-            .and_then(|s| s.trim().parse::<f32>().ok());
-        match secs {
-            Some(secs) if secs > 0.0 => {
-                let _ = tx.send(Msg::Media(Event::Duration { review, secs }));
-            }
-            _ => eprintln!("ahri: probe {}: no video duration", path.display()),
+            .unwrap_or_default();
+        let (secs, fps) = parse_probe(&text);
+        if secs.is_none() {
+            eprintln!("ahri: probe {}: no video duration", path.display());
         }
+        let _ = tx.send(Msg::Media(Event::Probed { review, secs, fps }));
     });
+}
+
+fn parse_probe(text: &str) -> (Option<f32>, Option<f32>) {
+    let field = |key: &str| {
+        text.lines()
+            .find_map(|l| l.trim().strip_prefix(key)?.strip_prefix('='))
+            .map(str::to_string)
+    };
+    let secs = field("duration")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|&v| v > 0.0);
+    let fps = field("avg_frame_rate")
+        .and_then(|v| {
+            let (n, d) = v.split_once('/').unwrap_or((&v, "1"));
+            Some(n.parse::<f32>().ok()? / d.parse::<f32>().ok()?)
+        })
+        .filter(|v| v.is_finite() && *v > 0.0);
+    (secs, fps)
 }
 
 fn wave(path: &Path, track: usize) -> Result<Vec<f32>, String> {
@@ -457,13 +489,19 @@ mod tests {
             path: PathBuf::from("/v/.ahri-raw-x.mp4"),
             duration: 10.0,
             bytes: 2_500_000,
+            fps: 60.0,
         }
     }
 
     fn settings(quality: Quality, from: f32, to: f32, tracks: [bool; 2]) -> Settings {
+        at_fps(quality, RECORD_FPS, from, to, tracks)
+    }
+
+    fn at_fps(quality: Quality, fps: u32, from: f32, to: f32, tracks: [bool; 2]) -> Settings {
         Settings {
             tracks: tracks.to_vec(),
             quality,
+            fps,
             from,
             to,
         }
@@ -493,10 +531,41 @@ mod tests {
 
     #[test]
     fn no_tracks_drops_audio() {
-        let a = args(&settings(Quality::Minimal, 0.0, 10.0, [false, false]));
+        let a = args(&at_fps(Quality::Minimal, 30, 0.0, 10.0, [false, false]));
         assert!(a.contains("-an"));
         assert!(!a.contains("-filter_complex"));
-        assert!(a.contains("fps=30"));
+        assert!(a.contains("-vf fps=30,scale="));
+    }
+
+    #[test]
+    fn lower_fps_reencodes_original() {
+        let a = args(&at_fps(Quality::Original, 30, 0.0, 10.0, [true, false]));
+        assert!(a.contains("-vf fps=30 -c:v libx264"));
+        assert!(a.contains("-crf 18"));
+        assert!(!a.contains("-c:v copy"));
+    }
+
+    #[test]
+    fn record_fps_keeps_frames() {
+        let a = args(&at_fps(Quality::Light, RECORD_FPS, 0.0, 10.0, [true, false]));
+        assert!(!a.contains("fps="));
+        assert!(!a.contains("-vf"));
+    }
+
+    #[test]
+    fn lower_fps_is_smaller() {
+        let src = source();
+        let size = |fps| src.estimate(&at_fps(Quality::Original, fps, 0.0, 10.0, [true, false]));
+        assert!(size(30) < size(60));
+        assert_eq!(size(60), size(120));
+    }
+
+    #[test]
+    fn probe_reads_duration_and_rate() {
+        let (secs, fps) = parse_probe("avg_frame_rate=7200/121\nduration=12.100000\n");
+        assert_eq!(secs, Some(12.1));
+        assert!((fps.unwrap() - 59.504).abs() < 0.01);
+        assert_eq!(parse_probe("avg_frame_rate=0/0\nduration=N/A\n"), (None, None));
     }
 
     #[test]

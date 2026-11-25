@@ -75,7 +75,8 @@ impl Recording {
 fn spawn(region: &str, audio: &[&str], path: &Path) -> std::io::Result<Child> {
     Command::new("gpu-screen-recorder")
         .args(["-w", region])
-        .args(["-f", "60", "-k", "h264", "-c", "mp4", "-cursor", "yes"])
+        .args(["-f", &crate::media::RECORD_FPS.to_string()])
+        .args(["-k", "h264", "-c", "mp4", "-cursor", "yes"])
         .args(audio.iter().flat_map(|a| ["-a", a]))
         .args(["-fallback-cpu-encoding", "yes", "-o"])
         .arg(path)

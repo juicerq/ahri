@@ -11,7 +11,7 @@ use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::
 use smithay_client_toolkit::seat::keyboard::Keysym;
 use tiny_skia::{FillRule, PathBuilder, Pixmap, PixmapMut, Rect, Stroke, Transform};
 
-use crate::media::{self, Event, FramePool, PlayRequest, Proc, Quality, Settings, Source, WAVE_BUCKETS};
+use crate::media::{self, Event, FPS, FramePool, PlayRequest, Proc, Quality, Settings, Source, WAVE_BUCKETS};
 use crate::text::{self, Canvas, Weight};
 use crate::{Msg, draw, record};
 
@@ -36,6 +36,9 @@ const MAX_VH: f32 = 340.0;
 const MIN_VW: f32 = 320.0;
 const MAX_UPSCALE: f32 = 2.0;
 const MIN_CLIP: f32 = 0.5;
+const SIZE_LIMIT: u64 = 15_000_000;
+const DEFAULT_FPS: u32 = 30;
+const SEG_GAP: f32 = 4.0;
 const GRAB: f32 = 8.0;
 const VIDEO_RADIUS: f32 = 8.0;
 const TRACK_NAMES: [&str; 2] = ["Sistema", "Microfone"];
@@ -98,6 +101,8 @@ struct Layout {
     cards: [R; 2],
     quality_label: f32,
     rows: [R; 3],
+    fps_label: f32,
+    fps: [R; 3],
     button: R,
 }
 
@@ -106,7 +111,7 @@ impl Layout {
         let (sw, sh) = (src.0.max(1) as f32, src.1.max(1) as f32);
         let k = (MAX_VW / sw).min(MAX_VH / sh).min(MAX_UPSCALE);
         let (dw, dh) = ((sw * k).round().max(2.0), (sh * k).round().max(2.0));
-        let col_h = SECTION + 2.0 * (CARD_H + CARD_GAP) + SECTION + 3.0 * (ROW_H + ROW_GAP) + GAP + BTN_H;
+        let col_h = SECTION + 2.0 * (CARD_H + CARD_GAP) + SECTION + 3.0 * (ROW_H + ROW_GAP) + SECTION + ROW_H + GAP + BTN_H;
         let box_w = dw.max(MIN_VW);
         let box_h = dh.max(col_h - TRIM_H);
         let body_h = box_h + TRIM_H;
@@ -127,6 +132,10 @@ impl Layout {
         let quality_label = cards[1].bottom() + CARD_GAP;
         let row = |i: f32| R::new(col.x, quality_label + SECTION + i * (ROW_H + ROW_GAP), COL_W, ROW_H);
         let rows = [row(0.0), row(1.0), row(2.0)];
+        let fps_label = rows[2].bottom() + ROW_GAP;
+        let seg_w = (COL_W - 2.0 * SEG_GAP) / 3.0;
+        let seg = |i: f32| R::new(col.x + i * (seg_w + SEG_GAP), fps_label + SECTION, seg_w, ROW_H);
+        let fps = [seg(0.0), seg(1.0), seg(2.0)];
         let button = R::new(col.x, col.bottom() - BTN_H, COL_W, BTN_H);
         Self {
             size: ((pw + MARGIN * 2.0) as u32, (ph + MARGIN * 2.0) as u32),
@@ -138,6 +147,8 @@ impl Layout {
             cards,
             quality_label,
             rows,
+            fps_label,
+            fps,
             button,
         }
     }
@@ -195,6 +206,8 @@ pub struct Review {
     src_size: (u32, u32),
     tracks: Vec<Track>,
     quality: Quality,
+    quality_auto: bool,
+    fps: u32,
     from: f32,
     to: f32,
     playing: bool,
@@ -248,6 +261,7 @@ impl Review {
                 path: raw,
                 duration: duration.max(MIN_CLIP),
                 bytes,
+                fps: media::RECORD_FPS as f32,
             },
             src_size,
             tracks: (0..TRACK_NAMES.len())
@@ -257,7 +271,9 @@ impl Review {
                     missing: false,
                 })
                 .collect(),
-            quality: Quality::Light,
+            quality: Quality::Original,
+            quality_auto: true,
+            fps: DEFAULT_FPS,
             from: 0.0,
             to: duration.max(MIN_CLIP),
             playing: false,
@@ -274,6 +290,7 @@ impl Review {
             drag: None,
             tx,
         };
+        review.auto_quality();
         media::probe(&review.source.path, review.id, review.tx.clone());
         review.start_player(0.0);
         Ok(review)
@@ -293,9 +310,20 @@ impl Review {
         Settings {
             tracks: self.tracks.iter().map(|t| t.on && !t.missing).collect(),
             quality,
+            fps: self.fps,
             from: self.from,
             to: self.to,
         }
+    }
+
+    fn auto_quality(&mut self) {
+        if !self.quality_auto {
+            return;
+        }
+        self.quality = Quality::ALL
+            .into_iter()
+            .find(|&q| self.source.estimate(&self.settings(q)) <= SIZE_LIMIT)
+            .unwrap_or(Quality::Minimal);
     }
 
     fn export_key(&self) -> Settings {
@@ -308,6 +336,7 @@ impl Review {
     }
 
     fn ensure_export(&mut self) {
+        self.auto_quality();
         let key = self.export_key();
         if self.export.as_ref().is_some_and(|e| e.key == key) {
             return;
@@ -460,8 +489,16 @@ impl Review {
                 }
                 Outcome::Redraw
             }
-            Event::Duration { review, secs } => {
-                if review == self.id && (secs - self.source.duration).abs() > 0.001 {
+            Event::Probed { review, secs, fps } => {
+                if review != self.id {
+                    return Outcome::Nothing;
+                }
+                let mut changed = false;
+                if let Some(fps) = fps.filter(|f| (f - self.source.fps).abs() > 0.01) {
+                    self.source.fps = fps;
+                    changed = true;
+                }
+                if let Some(secs) = secs.filter(|s| (s - self.source.duration).abs() > 0.001) {
                     let full = !self.source.trimmed(self.from, self.to);
                     self.source.duration = secs;
                     if full || self.to > secs {
@@ -469,13 +506,18 @@ impl Review {
                     }
                     self.from = self.clamp_from(self.from);
                     self.pos = self.pos.clamp(self.from, self.to);
-                    if self.started {
-                        self.ensure_export();
-                    }
-                    self.base_dirty = true;
-                    return Outcome::Redraw;
+                    changed = true;
                 }
-                Outcome::Nothing
+                if !changed {
+                    return Outcome::Nothing;
+                }
+                if self.started {
+                    self.ensure_export();
+                } else {
+                    self.auto_quality();
+                }
+                self.base_dirty = true;
+                Outcome::Redraw
             }
             Event::Wave { review, track, peaks } => {
                 let Some(t) = self.tracks.get_mut(track).filter(|_| review == self.id) else {
@@ -608,6 +650,7 @@ impl Review {
     }
 
     fn set_quality(&mut self, q: Quality) -> Outcome {
+        self.quality_auto = false;
         if q == self.quality {
             return Outcome::Nothing;
         }
@@ -621,6 +664,21 @@ impl Review {
         let i = Quality::ALL.iter().position(|&q| q == self.quality).unwrap_or(0) as isize;
         let n = (i + d).clamp(0, Quality::ALL.len() as isize - 1) as usize;
         self.set_quality(Quality::ALL[n])
+    }
+
+    fn set_fps(&mut self, fps: u32) -> Outcome {
+        if fps == self.fps {
+            return Outcome::Nothing;
+        }
+        self.fps = fps;
+        self.base_dirty = true;
+        self.ensure_export();
+        Outcome::Redraw
+    }
+
+    fn cycle_fps(&mut self) -> Outcome {
+        let i = FPS.iter().position(|&f| f == self.fps).unwrap_or(0);
+        self.set_fps(FPS[(i + 1) % FPS.len()])
     }
 
     fn min_clip(&self) -> f32 {
@@ -668,6 +726,7 @@ impl Review {
             Keysym::_2 | Keysym::KP_2 => self.toggle_track(1),
             Keysym::Up => self.step_quality(-1),
             Keysym::Down => self.step_quality(1),
+            Keysym::f | Keysym::F if !ctrl => self.cycle_fps(),
             Keysym::Left => self.seek(self.current_pos() - 1.0),
             Keysym::Right => self.seek(self.current_pos() + 1.0),
             Keysym::i | Keysym::I if !ctrl => {
@@ -742,6 +801,7 @@ impl Review {
                 .zip(&self.tracks)
                 .any(|(r, t)| !t.missing && r.contains(x, y))
             || self.lay.rows.iter().any(|r| r.contains(x, y))
+            || self.lay.fps.iter().any(|r| r.contains(x, y))
             || self.lay.button.contains(x, y);
         if clickable { Shape::Pointer } else { Shape::Default }
     }
@@ -767,6 +827,9 @@ impl Review {
         }
         if let Some(i) = self.lay.rows.iter().position(|r| r.contains(x, y)) {
             return self.set_quality(Quality::ALL[i]);
+        }
+        if let Some(i) = self.lay.fps.iter().position(|r| r.contains(x, y)) {
+            return self.set_fps(FPS[i]);
         }
         if self.lay.button.contains(x, y) {
             return self.copy();
@@ -1064,6 +1127,9 @@ impl Review {
                 fill(&mut pm, *row, 6.0, SELECTED, t);
             }
         }
+        for (seg, &f) in lay.fps.iter().zip(&FPS) {
+            fill(&mut pm, *seg, 6.0, if f == self.fps { SELECTED } else { CARD }, t);
+        }
 
         let btn = lay.button;
         fill(&mut pm, btn, 7.0, YELLOW, t);
@@ -1102,7 +1168,7 @@ impl Review {
         let hb = lay.panel.y + 25.0;
         let after = label(&mut c, s, hx, hb, 13.0, Weight::Medium, TEXT, "Gravação", Align::Left);
         let meta = format!(
-            "{} · {}×{} · 60 fps",
+            "{} · {}×{}",
             clock(self.source.duration),
             self.src_size.0,
             self.src_size.1
@@ -1194,6 +1260,21 @@ impl Review {
                 color,
                 size,
                 Align::Right,
+            );
+        }
+        section(&mut c, lay.fps_label, "FPS");
+        for (seg, &f) in lay.fps.iter().zip(&FPS) {
+            let sel = f == self.fps;
+            label(
+                &mut c,
+                s,
+                seg.x + seg.w / 2.0,
+                seg.y + 18.5,
+                12.0,
+                Weight::Regular,
+                if sel { [255; 4] } else { TEXT_DIM },
+                &f.to_string(),
+                Align::Center,
             );
         }
         let bb = btn.y + 23.0;
