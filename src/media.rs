@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 
@@ -13,6 +14,8 @@ pub const WAVE_BUCKETS: usize = 240;
 pub const PREVIEW_FPS: f32 = 60.0;
 const WAVE_RATE: usize = 8000;
 const TRACKS: usize = 2;
+const MIC: usize = 1;
+const DENOISE: &str = "highpass=f=80,afftdn=nr=12:nf=-35";
 
 pub enum Event {
     Frame { id: u64, data: Vec<u8> },
@@ -92,12 +95,9 @@ impl Source {
         let mut a: Vec<String> = ["-nostdin", "-v", "error", "-y"].map(String::from).to_vec();
         let trimmed = self.trimmed(s);
         if trimmed {
-            a.extend(["-ss".into(), secs(s.from)]);
+            a.extend(["-ss".into(), secs(s.from), "-t".into(), secs(s.to - s.from)]);
         }
         a.extend(["-i".into(), self.path.to_string_lossy().into_owned()]);
-        if trimmed {
-            a.extend(["-t".into(), secs(s.to - s.from)]);
-        }
         a.extend(["-map", "0:v:0"].map(String::from));
         let rate = |bps: f32| {
             [
@@ -145,13 +145,15 @@ impl Source {
 }
 
 fn audio_graph(tracks: &[bool]) -> Option<String> {
+    let chain = |i: usize| if i == MIC { DENOISE } else { "anull" };
     let on: Vec<usize> = (0..tracks.len()).filter(|&i| tracks[i]).collect();
     match on.as_slice() {
         [] => None,
-        [i] => Some(format!("[0:a:{i}]anull[a]")),
+        [i] => Some(format!("[0:a:{i}]{}[a]", chain(*i))),
         many => {
-            let inputs: String = many.iter().map(|i| format!("[0:a:{i}]")).collect();
-            Some(format!("{inputs}amix=inputs={}:normalize=0[a]", many.len()))
+            let inputs: String = many.iter().map(|&i| format!("[0:a:{i}]{}[t{i}];", chain(i))).collect();
+            let labels: String = many.iter().map(|i| format!("[t{i}]")).collect();
+            Some(format!("{inputs}{labels}amix=inputs={}:normalize=0[a]", many.len()))
         }
     }
 }
@@ -224,10 +226,11 @@ pub fn play(req: PlayRequest, id: u64, pool: FramePool, tx: Sender<Msg>) -> Resu
     a.extend([
         "-ss".into(),
         secs(req.from),
+        "-t".into(),
+        secs(req.to - req.from),
         "-i".into(),
         req.path.to_string_lossy().into_owned(),
     ]);
-    a.extend(["-t".into(), secs(req.to - req.from)]);
     let audio = if req.still { None } else { audio_graph(req.tracks) };
     let mut graph = format!("[0:v:0]fps={PREVIEW_FPS},scale={w}:{h}:flags=bilinear,format=bgra[v]");
     if let Some(g) = &audio {
@@ -250,11 +253,16 @@ pub fn play(req: PlayRequest, id: u64, pool: FramePool, tx: Sender<Msg>) -> Resu
     let still = req.still;
     let len = w as usize * h as usize * 4;
     std::thread::spawn(move || {
-        loop {
+        let mut start = None;
+        for n in 0u32.. {
             let mut buf = pool.lock().ok().and_then(|mut p| p.pop()).unwrap_or_default();
             buf.resize(len, 0);
             if stdout.read_exact(&mut buf).is_err() {
                 break;
+            }
+            if !still {
+                let due = *start.get_or_insert_with(Instant::now) + Duration::from_secs_f32(n as f32 / PREVIEW_FPS);
+                std::thread::sleep(due.saturating_duration_since(Instant::now()));
             }
             if tx.send(Msg::Media(Event::Frame { id, data: buf })).is_err() {
                 return;
@@ -432,9 +440,11 @@ mod tests {
     #[test]
     fn trimmed_export_seeks_and_reencodes() {
         let a = args(&settings(Quality::Original, 1.5, 6.0, [true, true]));
-        assert!(a.contains("-ss 1.500 -i /v/.ahri-raw-x.mp4 -t 4.500"));
+        assert!(a.contains("-ss 1.500 -t 4.500 -i /v/.ahri-raw-x.mp4"));
         assert!(a.contains("-c:v libx264"));
-        assert!(a.contains("[0:a:0][0:a:1]amix=inputs=2:normalize=0[a]"));
+        assert!(a.contains(&format!(
+            "[0:a:0]anull[t0];[0:a:1]{DENOISE}[t1];[t0][t1]amix=inputs=2:normalize=0[a]"
+        )));
     }
 
     #[test]

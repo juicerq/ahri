@@ -61,7 +61,7 @@ Aperte <kbd>Win</kbd> <kbd>R</kbd> e arraste uma caixa. A gravação começa qua
 
 Aperte <kbd>Win</kbd> <kbd>R</kbd> de novo para parar. Um painel abre no meio da tela com o vídeo tocando. Nele você escolhe as faixas de áudio, a qualidade e onde o vídeo começa e termina.
 
-O áudio do sistema e o do microfone são gravados em faixas separadas. Cada faixa mostra a própria onda, então dá para ver se o microfone pegou algo antes de ligar.
+O áudio do sistema e o do microfone são gravados em faixas separadas. Cada faixa mostra a própria onda, então dá para ver se o microfone pegou algo antes de ligar. As duas começam desligadas, e o microfone passa por uma redução de ruído que tira chiado e zumbido de fundo.
 
 O vídeo final é preparado em segundo plano enquanto você assiste. Aperte <kbd>Ctrl</kbd> <kbd>C</kbd>: ele vai para `~/Vídeos/Ahri/`, e o arquivo já fica no clipboard para colar no Discord, no navegador ou no gerenciador de arquivos.
 
