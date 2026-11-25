@@ -500,7 +500,7 @@ impl Overlay {
         let bg = draw::paint(draw::rgba(32, 34, 37, 240));
         let active = draw::paint(draw::rgba(255, 255, 255, 40));
         let current = draw::palette(self.color);
-        if let Some(path) = rounded(bar, 8.0 * s) {
+        if let Some(path) = draw::rounded(bar, 8.0 * s) {
             frame.fill_path(&path, &bg, FillRule::Winding, id, None);
         }
         for (hit, r) in buttons {
@@ -508,7 +508,7 @@ impl Overlay {
                 Hit::Tool(tool) => tool == self.tool,
                 _ => self.palette_open,
             };
-            if on && let Some(path) = rounded(r, 6.0 * s) {
+            if on && let Some(path) = draw::rounded(r, 6.0 * s) {
                 frame.fill_path(&path, &active, FillRule::Winding, id, None);
             }
             let inset = 9.0 * s;
@@ -541,7 +541,7 @@ impl Overlay {
         let (Some(panel), Some(swatches)) = (self.palette_rect(), self.swatch_rects()) else {
             return;
         };
-        if let Some(path) = rounded(panel, 8.0 * s) {
+        if let Some(path) = draw::rounded(panel, 8.0 * s) {
             frame.fill_path(&path, &bg, FillRule::Winding, id, None);
         }
         for (hit, r) in swatches {
@@ -598,28 +598,4 @@ fn swatch(frame: &mut PixmapMut, r: Rect, color: Color, selected: bool, s: f32) 
         };
         frame.stroke_path(&ring, &draw::paint(Color::WHITE), &stroke, id, None);
     }
-}
-
-fn rounded(r: Rect, radius: f32) -> Option<tiny_skia::Path> {
-    let (x, y, w, h) = (r.x(), r.y(), r.width(), r.height());
-    let k = radius * 0.5523;
-    let mut pb = PathBuilder::new();
-    pb.move_to(x + radius, y);
-    pb.line_to(x + w - radius, y);
-    pb.cubic_to(x + w - radius + k, y, x + w, y + radius - k, x + w, y + radius);
-    pb.line_to(x + w, y + h - radius);
-    pb.cubic_to(
-        x + w,
-        y + h - radius + k,
-        x + w - radius + k,
-        y + h,
-        x + w - radius,
-        y + h,
-    );
-    pb.line_to(x + radius, y + h);
-    pb.cubic_to(x + radius - k, y + h, x, y + h - radius + k, x, y + h - radius);
-    pb.line_to(x, y + radius);
-    pb.cubic_to(x, y + radius - k, x + radius - k, y, x + radius, y);
-    pb.close();
-    pb.finish()
 }

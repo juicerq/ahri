@@ -1,9 +1,12 @@
 mod capture;
 mod clipboard;
 mod draw;
+mod media;
 mod overlay;
 mod record;
+mod review;
 mod shortcuts;
+mod text;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -44,11 +47,13 @@ use clipboard::{Clipboard, Payload};
 use draw::{Sel, Tool};
 use overlay::{Mode, Outcome, Overlay};
 use record::Recording;
+use review::{Panel, Review};
 use shortcuts::Action;
 
 pub enum Msg {
     Shortcut(Action),
     RecordingDone(Result<PathBuf, String>),
+    Media(media::Event),
     Fatal(String),
 }
 
@@ -80,7 +85,10 @@ pub struct App {
     opened_at: Option<(Instant, Duration)>,
     pending_record: Option<(i32, i32, u32, u32)>,
     recording: Option<Recording>,
+    record_output: Option<wl_output::WlOutput>,
     stopping: bool,
+    review: Option<Panel>,
+    review_opened: Option<Instant>,
     fatal: Option<String>,
 }
 
@@ -143,10 +151,15 @@ fn run() -> Result<(), String> {
         opened_at: None,
         pending_record: None,
         recording: None,
+        record_output: None,
         stopping: false,
+        review: None,
+        review_opened: None,
         fatal: None,
     };
 
+    text::warm();
+    record::recover();
     shortcuts::spawn(tx);
     eprintln!("ahri: ready");
 
@@ -167,6 +180,9 @@ impl App {
                 }
             }
             Msg::Shortcut(Action::Record) => {
+                if self.review.is_some() {
+                    return;
+                }
                 if let Some(rec) = &self.recording {
                     if !self.stopping {
                         self.stopping = true;
@@ -179,18 +195,27 @@ impl App {
                 }
             }
             Msg::RecordingDone(result) => {
-                self.recording = None;
+                let rec = self.recording.take();
                 self.stopping = false;
                 self.close_overlay();
                 match result {
                     Ok(path) => {
-                        eprintln!("ahri: saved {}", path.display());
-                        self.copy_file(&path);
+                        let (size, duration) = rec
+                            .map(|r| (r.size, r.started.elapsed().as_secs_f32()))
+                            .unwrap_or(((0, 0), 0.0));
+                        eprintln!("ahri: recorded {}", path.display());
+                        self.open_review(path, size, duration);
                     }
                     Err(e) => {
                         eprintln!("ahri: recording failed: {e}");
                         self.notify("Falha na gravação", &e);
                     }
+                }
+            }
+            Msg::Media(ev) => {
+                if let Some(r) = self.review.as_mut() {
+                    let outcome = r.review.media(ev);
+                    self.apply_review(outcome);
                 }
             }
             Msg::Fatal(e) => self.fatal = Some(e),
@@ -222,6 +247,107 @@ impl App {
         let (layer, viewport) = self.new_layer();
         self.opened_at = Some((started, Duration::ZERO));
         self.overlay = Some(Overlay::new(layer, viewport, Mode::Record));
+    }
+
+    fn open_review(&mut self, raw: PathBuf, size: (u32, u32), duration: f32) {
+        let started = Instant::now();
+        let output = self.record_output.take().or_else(|| self.output_state.outputs().next());
+        let scale = output
+            .as_ref()
+            .and_then(|o| self.output_state.info(o))
+            .map(|i| i.scale_factor.max(1) as f32)
+            .unwrap_or(1.0);
+        let qh = &self.qh;
+        let surface = self.compositor.create_surface(qh);
+        let viewport = self.viewporter.get_viewport(&surface, qh, Ud);
+        let layer =
+            self.layer_shell
+                .create_layer_surface(qh, surface, Layer::Overlay, Some(NAMESPACE), output.as_ref());
+        layer.set_anchor(Anchor::empty());
+        layer.set_exclusive_zone(-1);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        match Review::new(scale, raw.clone(), size, duration, self.tx.clone()) {
+            Ok(review) => {
+                let r = Panel::new(layer, viewport, review);
+                let (x, y, w, h) = r.review.input_rect();
+                let region = self.compositor.wl_compositor().create_region(&self.qh, Ud);
+                region.add(x, y, w, h);
+                r.layer.wl_surface().set_input_region(Some(&region));
+                region.destroy();
+                r.layer.commit();
+                self.review = Some(r);
+                self.review_opened = Some(started);
+            }
+            Err(e) => {
+                viewport.destroy();
+                drop(layer);
+                eprintln!("ahri: review: {e}");
+                let to = record::final_path(&raw);
+                let _ = std::fs::rename(&raw, &to);
+                self.copy_file(&to);
+            }
+        }
+    }
+
+    fn close_review(&mut self) {
+        if let Some(r) = self.review.take() {
+            r.viewport.destroy();
+            drop(r);
+        }
+    }
+
+    fn apply_review(&mut self, outcome: review::Outcome) {
+        match outcome {
+            review::Outcome::Nothing => {}
+            review::Outcome::Redraw => {
+                if let Some(r) = self.review.as_mut() {
+                    r.dirty = true;
+                }
+                let qh = self.qh.clone();
+                self.redraw_review(&qh);
+            }
+            review::Outcome::Close => self.close_review(),
+            review::Outcome::Copied(path) => {
+                self.close_review();
+                let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+                eprintln!("ahri: saved {} ({} KiB)", path.display(), size / 1024);
+                self.copy_file(&path);
+            }
+            review::Outcome::Failed(e) => {
+                eprintln!("ahri: copy failed: {e}");
+                self.notify("Falha ao preparar o vídeo", &e);
+                let qh = self.qh.clone();
+                self.redraw_review(&qh);
+            }
+        }
+    }
+
+    fn redraw_review(&mut self, qh: &QueueHandle<Self>) {
+        let Some(r) = self.review.as_mut() else { return };
+        if !r.configured {
+            return;
+        }
+        if r.frame_pending {
+            r.dirty = true;
+            return;
+        }
+        let render_started = Instant::now();
+        if let Err(e) = r.present(&mut self.pool) {
+            eprintln!("ahri: present review: {e}");
+            return;
+        }
+        let surface = r.layer.wl_surface();
+        surface.frame(qh, FrameCallbackData(surface.clone()));
+        r.layer.commit();
+        r.dirty = false;
+        r.frame_pending = true;
+        if let Some(started) = self.review_opened.take() {
+            eprintln!(
+                "ahri: review shown in {:?} (render {:?})",
+                started.elapsed(),
+                render_started.elapsed()
+            );
+        }
     }
 
     fn new_layer(&self) -> (LayerSurface, WpViewport) {
@@ -340,6 +466,7 @@ impl App {
         let output = ov.output.clone().or_else(|| self.output_state.outputs().next());
         let info = output.as_ref().and_then(|o| self.output_state.info(o));
         let pos = info.as_ref().and_then(|i| i.logical_position).unwrap_or((0, 0));
+        self.record_output = output.clone();
         let screen = (ov.logical.0 as i32, ov.logical.1 as i32);
 
         let x0 = ((sel.x / ov.scale).floor() as i32).clamp(0, screen.0) & !1;
@@ -420,6 +547,13 @@ impl CompositorHandler for App {
     }
 
     fn frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, surface: &wl_surface::WlSurface, _: u32) {
+        if let Some(r) = self.review.as_mut().filter(|r| r.layer.wl_surface() == surface) {
+            r.frame_pending = false;
+            if r.dirty {
+                self.redraw_review(qh);
+            }
+            return;
+        }
         let Some(ov) = self.overlay.as_mut() else { return };
         if ov.layer.wl_surface() != surface {
             return;
@@ -459,6 +593,12 @@ impl LayerShellHandler for App {
         if self.overlay.as_ref().is_some_and(|o| &o.layer == layer) {
             self.close_overlay();
         }
+        if self.review.as_ref().is_some_and(|r| &r.layer == layer) {
+            if let Some(r) = self.review.as_mut() {
+                r.review.keep();
+            }
+            self.close_review();
+        }
     }
 
     fn configure(
@@ -469,6 +609,13 @@ impl LayerShellHandler for App {
         cfg: LayerSurfaceConfigure,
         _: u32,
     ) {
+        if let Some(r) = self.review.as_mut().filter(|r| &r.layer == layer) {
+            r.configured = true;
+            r.frame_pending = false;
+            r.dirty = true;
+            self.redraw_review(qh);
+            return;
+        }
         let Some(ov) = self.overlay.as_mut().filter(|o| &o.layer == layer) else {
             return;
         };
@@ -573,8 +720,14 @@ impl KeyboardHandler for App {
         _: u32,
         event: KeyEvent,
     ) {
-        let Some(ov) = self.overlay.as_mut() else { return };
         let ctrl = self.modifiers.ctrl;
+        let Some(ov) = self.overlay.as_mut() else {
+            if let Some(r) = self.review.as_mut() {
+                let outcome = r.review.key(event.keysym, ctrl);
+                self.apply_review(outcome);
+            }
+            return;
+        };
         let outcome = match event.keysym {
             Keysym::Escape => Outcome::Close,
             Keysym::c | Keysym::C if ctrl && ov.is_shot() => Outcome::Copy,
@@ -620,6 +773,32 @@ impl PointerHandler for App {
         events: &[PointerEvent],
     ) {
         for event in events {
+            if let Some(r) = self.review.as_mut().filter(|r| r.layer.wl_surface() == &event.surface) {
+                let (x, y) = (
+                    event.position.0 as f32 / review::ZOOM,
+                    event.position.1 as f32 / review::ZOOM,
+                );
+                let outcome = match event.kind {
+                    PointerEventKind::Enter { serial } => {
+                        self.pointer_serial = serial;
+                        self.cursor = None;
+                        review::Outcome::Nothing
+                    }
+                    PointerEventKind::Motion { .. } => r.review.motion(x, y),
+                    PointerEventKind::Press { button: BTN_LEFT, .. } => r.review.press(x, y),
+                    PointerEventKind::Release { button: BTN_LEFT, .. } => r.review.release(),
+                    _ => review::Outcome::Nothing,
+                };
+                let shape = r.review.cursor_at(x, y);
+                if self.cursor != Some(shape) {
+                    if let Some(dev) = &self.cursor_device {
+                        dev.set_shape(self.pointer_serial, shape);
+                    }
+                    self.cursor = Some(shape);
+                }
+                self.apply_review(outcome);
+                continue;
+            }
             let Some(ov) = self.overlay.as_mut().filter(|o| o.layer.wl_surface() == &event.surface) else {
                 continue;
             };

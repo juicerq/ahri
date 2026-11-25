@@ -59,7 +59,23 @@ Arraste as bordas ou os cantos para redimensionar a área. Com quadrado ou círc
 
 Aperte <kbd>Win</kbd> <kbd>R</kbd> e arraste uma caixa. A gravação começa quando você solta o mouse.
 
-Aperte <kbd>Win</kbd> <kbd>R</kbd> de novo para parar. O vídeo vai para `~/Vídeos/Ahri/`, e o arquivo já fica no clipboard para colar no Discord, no navegador ou no gerenciador de arquivos.
+Aperte <kbd>Win</kbd> <kbd>R</kbd> de novo para parar. Um painel abre no meio da tela com o vídeo tocando. Nele você escolhe as faixas de áudio, a qualidade e onde o vídeo começa e termina.
+
+O áudio do sistema e o do microfone são gravados em faixas separadas. Cada faixa mostra a própria onda, então dá para ver se o microfone pegou algo antes de ligar.
+
+O vídeo final é preparado em segundo plano enquanto você assiste. Aperte <kbd>Ctrl</kbd> <kbd>C</kbd>: ele vai para `~/Vídeos/Ahri/`, e o arquivo já fica no clipboard para colar no Discord, no navegador ou no gerenciador de arquivos.
+
+| Tecla | Ação |
+| --- | --- |
+| <kbd>Espaço</kbd> | Tocar ou pausar |
+| <kbd>1</kbd> e <kbd>2</kbd> | Ligar ou desligar o áudio do sistema e o microfone |
+| <kbd>↑</kbd> e <kbd>↓</kbd> | Trocar a qualidade |
+| <kbd>←</kbd> e <kbd>→</kbd> | Voltar ou avançar 1 segundo |
+| <kbd>I</kbd> e <kbd>O</kbd> | Cortar o início ou o fim no ponto atual |
+| <kbd>Ctrl</kbd> <kbd>C</kbd> ou <kbd>Enter</kbd> | Salvar e copiar |
+| <kbd>Esc</kbd> | Descartar a gravação |
+
+Arraste as alças amarelas da barra para cortar com o mouse, ou clique na barra para pular para um ponto.
 
 <p align="center"><img src="docs/gravando.png" width="600" alt="Área sendo gravada, com a moldura vermelha por fora"></p>
 
@@ -67,10 +83,10 @@ A moldura fica fora da área gravada e não bloqueia cliques.
 
 ## Instalação
 
-Precisa de KDE Plasma 6 no Wayland, Rust e [gpu-screen-recorder](https://git.dec05eba.com/gpu-screen-recorder/about/).
+Precisa de KDE Plasma 6 no Wayland, Rust, [gpu-screen-recorder](https://git.dec05eba.com/gpu-screen-recorder/about/) e FFmpeg.
 
 ```sh
-sudo pacman -S gpu-screen-recorder
+sudo pacman -S gpu-screen-recorder ffmpeg
 git clone https://github.com/juicerq/ahri
 cd ahri
 ./install.sh
@@ -98,6 +114,7 @@ rm ~/.local/bin/ahri ~/.local/share/applications/ahri.desktop \
 | Atalhos | kglobalaccel por D-Bus |
 | Clipboard | `ext-data-control`, servido pelo próprio daemon |
 | Gravação | `gpu-screen-recorder` em H.264, na GPU quando dá e na CPU quando não dá |
+| Revisão | FFmpeg toca a prévia, desenha a onda e prepara o vídeo final |
 
 <br>
 

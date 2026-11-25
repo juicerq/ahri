@@ -276,6 +276,30 @@ pub fn selection_frame(canvas: &mut PixmapMut, sel: &Sel, gap: f32, color: Color
     }
 }
 
+pub fn rounded(r: Rect, radius: f32) -> Option<tiny_skia::Path> {
+    let (x, y, w, h) = (r.x(), r.y(), r.width(), r.height());
+    let k = radius * 0.5523;
+    let mut pb = PathBuilder::new();
+    pb.move_to(x + radius, y);
+    pb.line_to(x + w - radius, y);
+    pb.cubic_to(x + w - radius + k, y, x + w, y + radius - k, x + w, y + radius);
+    pb.line_to(x + w, y + h - radius);
+    pb.cubic_to(
+        x + w,
+        y + h - radius + k,
+        x + w - radius + k,
+        y + h,
+        x + w - radius,
+        y + h,
+    );
+    pb.line_to(x + radius, y + h);
+    pb.cubic_to(x + radius - k, y + h, x, y + h - radius + k, x, y + h - radius);
+    pb.line_to(x, y + radius);
+    pb.cubic_to(x, y + radius - k, x + radius - k, y, x + radius, y);
+    pb.close();
+    pb.finish()
+}
+
 pub fn encode_png(pixmap: &Pixmap) -> Result<Vec<u8>, String> {
     let mut rgba = pixmap.data().to_vec();
     swap_rb(&mut rgba);

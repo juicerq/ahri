@@ -8,6 +8,11 @@ if ! command -v gpu-screen-recorder >/dev/null; then
     exit 1
 fi
 
+if ! command -v ffmpeg >/dev/null; then
+    echo "ffmpeg não encontrado. Instale antes: sudo pacman -S ffmpeg" >&2
+    exit 1
+fi
+
 cargo build --release
 
 bin="$HOME/.local/bin/ahri"
